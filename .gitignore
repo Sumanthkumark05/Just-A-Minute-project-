@@ -1,0 +1,32 @@
+# Python
+venv/
+backend/venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+
+# Database
+*.db
+*.sqlite3
+
+# Uploads
+uploads/
+backend/uploads/
+
+# Environment
+.env
+.env.local
+
+# Node
+node_modules/
+.next/
+out/
+build/
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/

@@ -1,0 +1,147 @@
+import bcrypt
+# Monkeypatch bcrypt to truncate passwords > 72 bytes to avoid passlib crash with newer bcrypt versions
+_orig_hashpw = bcrypt.hashpw
+def _patched_hashpw(password, salt):
+    if len(password) > 72:
+        password = password[:72]
+    return _orig_hashpw(password, salt)
+bcrypt.hashpw = _patched_hashpw
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from app.database import Base, get_db
+from app.config import settings
+from app.models import User, JAMSession, JAMMetrics
+from main import app
+
+# Setup test database (temporary SQLite file)
+import os
+SQLALCHEMY_DATABASE_URL = "sqlite:///./test_temp.db"
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Override the database dependency in FastAPI app
+def override_get_db():
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+app.dependency_overrides[get_db] = override_get_db
+
+@pytest.fixture(autouse=True)
+def setup_db():
+    # Create tables before each test
+    Base.metadata.create_all(bind=engine)
+    yield
+    # Drop tables after each test
+    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
+    # Remove test database file
+    if os.path.exists("./test_temp.db"):
+        try:
+            os.remove("./test_temp.db")
+        except Exception:
+            pass
+
+client = TestClient(app)
+
+def test_signup_and_login():
+    # 1. Test Signup
+    signup_data = {
+        "email": "testuser@example.com",
+        "password": "testpassword123",
+        "name": "Test User"
+    }
+    response = client.post("/api/auth/signup", json=signup_data)
+    assert response.status_code == 201
+    json_data = response.json()
+    assert json_data["email"] == "testuser@example.com"
+    assert json_data["name"] == "Test User"
+    assert "id" in json_data
+
+    # 2. Test Signup with existing email (should fail)
+    response = client.post("/api/auth/signup", json=signup_data)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "A user with this email already exists"
+
+    # 3. Test Login
+    login_data = {
+        "email": "testuser@example.com",
+        "password": "testpassword123"
+    }
+    response = client.post("/api/auth/login", json=login_data)
+    assert response.status_code == 200
+    token_data = response.json()
+    assert "access_token" in token_data
+    assert token_data["token_type"] == "bearer"
+
+    # 4. Test Get Profile (Me)
+    headers = {"Authorization": f"Bearer {token_data['access_token']}"}
+    response = client.get("/api/auth/me", headers=headers)
+    assert response.status_code == 200
+    profile_data = response.json()
+    assert profile_data["email"] == "testuser@example.com"
+    assert profile_data["name"] == "Test User"
+
+
+def test_topic_generation():
+    # Test random topic
+    response = client.get("/api/jam/topic")
+    assert response.status_code == 200
+    data = response.json()
+    assert "topic" in data
+    assert "category" in data
+
+    # Test topic for specific category
+    response = client.get("/api/jam/topic?category=Technology")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["category"] == "Technology"
+    assert "topic" in data
+
+
+def test_jam_session_and_analytics():
+    # 1. Signup and login
+    signup_data = {
+        "email": "speaker@example.com",
+        "password": "password123",
+        "name": "Speaker"
+    }
+    client.post("/api/auth/signup", json=signup_data)
+    login_response = client.post("/api/auth/login", json={"email": "speaker@example.com", "password": "password123"})
+    token = login_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 2. Create JAM Session
+    session_payload = {
+        "topic": "Is AI replacing jobs?",
+        "category": "Technology"
+    }
+    response = client.post("/api/jam/session", json=session_payload, headers=headers)
+    assert response.status_code == 200
+    session_data = response.json()
+    assert session_data["topic"] == "Is AI replacing jobs?"
+    assert session_data["category"] == "Technology"
+    assert session_data["video_url"] is None
+    session_id = session_data["id"]
+
+    # 3. Verify Empty History & Analytics
+    response = client.get("/api/jam/history", headers=headers)
+    assert response.status_code == 200
+    assert len(response.json()) == 1  # The session is created but has no metrics yet
+    assert response.json()[0]["overall_score"] == 0
+
+    response = client.get("/api/jam/analytics", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["total_sessions"] == 0  # No sessions with metrics yet
+
+    # 4. Check Leaderboard
+    response = client.get("/api/jam/leaderboard")
+    assert response.status_code == 200
+    assert len(response.json()) == 0  # No users with completed reports

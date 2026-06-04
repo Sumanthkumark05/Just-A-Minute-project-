@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+pydantic-settings
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+google-genai
+pytest
+httpx
+email-validator
+opencv-python-headless
+mediapipe
+numpy
+faster-whisper
