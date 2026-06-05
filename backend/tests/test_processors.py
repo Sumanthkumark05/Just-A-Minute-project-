@@ -107,3 +107,90 @@ def test_local_evaluation_fallback():
     assert combined["fluency_score"] == 91  # 95 - 4*1
     assert combined["eye_contact_score"] == 85
     assert combined["grammar_score"] == eval_report["grammar_score"]
+
+def test_speech_evaluation_weighted_and_safeguards():
+    from app.services.ai_analyzer import calculate_local_semantic_relevance, analyze_video_speech, get_insufficient_audio_response
+    
+    # 1. Test local semantic relevance scoring
+    score = calculate_local_semantic_relevance(
+        transcript="AI is replacing standard workforce jobs and creating career opportunities in technology",
+        topic="Is AI replacing jobs?",
+        category="Technology"
+    )
+    assert score >= 50
+    
+    # Test synonym mapping
+    score_synonym = calculate_local_semantic_relevance(
+        transcript="Artificial intelligence automates careers and work in the physical environment",
+        topic="Is AI replacing jobs?",
+        category="Technology"
+    )
+    assert score_synonym >= 50
+    
+    # 2. Test weighted scoring logic
+    speech = {
+        "transcript": "hello",
+        "transcript_confidence": 90,
+        "speaking_pace_score": 80,
+        "words_per_minute": 130,
+        "filler_words": {"um": 0}
+    }
+    vision = {
+        "confidence_score": 80,
+        "fidgeting_index": 0.0,
+        "eye_contact_score": 80
+    }
+    evaluation = {
+        "semantic_similarity_score": 80,
+        "grammar_score": 80
+    }
+    combined = combine_metrics(speech, vision, evaluation)
+    
+    # Weights: 30% conf (27) + 30% relevance (24) + 20% fluency (16) + 10% grammar (8) + 10% pronunciation (9.8 clamped to 9) = 84
+    assert combined["accuracy_score"] == 84
+    
+    # 3. Test safeguards triggering on invalid audio path
+    blocked_empty = analyze_video_speech("dummy_path", "Is AI replacing jobs?", "Technology")
+    assert blocked_empty["accuracy_score"] == 0
+    assert "Audio quality insufficient for reliable evaluation." in blocked_empty["transcript"]
+
+def test_speech_analysis_quality_improvements():
+    from app.services.audio_processor import count_filler_words, clean_fillers_from_transcript
+    
+    # 1. Test repeat variations matching
+    fillers = count_filler_words("uumm, uhhh, er, like, you know, actually, basically, literally, kind of, sort of.")
+    assert fillers["um"] == 1
+    assert fillers["uh"] == 1
+    assert fillers["er"] == 1
+    assert fillers["like"] == 1
+    assert fillers["you know"] == 1
+    assert fillers["actually"] == 1
+    assert fillers["basically"] == 1
+    assert fillers["literally"] == 1
+    assert fillers["sort of"] == 1
+    assert fillers["kind of"] == 1
+
+    # 2. Test clean_fillers_from_transcript
+    raw = "So, um, like, actually, you know, we should go."
+    cleaned = clean_fillers_from_transcript(raw)
+    assert cleaned == "So, we should go."
+
+    # 3. Test analyze_speech_metrics with filler occurrences
+    words = [
+        {"word": "So", "start": 0.0, "end": 0.3},
+        {"word": "uumm", "start": 0.4, "end": 0.7},
+        {"word": "like", "start": 0.8, "end": 1.1},
+        {"word": "we", "start": 1.2, "end": 1.5},
+        {"word": "should", "start": 1.6, "end": 1.9},
+        {"word": "go", "start": 2.0, "end": 2.3}
+    ]
+    duration = 3.0
+    metrics = analyze_speech_metrics(words, duration)
+    assert metrics["raw_transcript"] == "So uumm like we should go"
+    assert metrics["transcript"] == "So we should go"
+    assert len(metrics["filler_occurrences"]) == 2
+    assert metrics["filler_occurrences"][0]["filler"] == "um"
+    assert metrics["filler_occurrences"][0]["start"] == 0.4
+    assert metrics["filler_occurrences"][1]["filler"] == "like"
+    assert metrics["filler_occurrences"][1]["start"] == 0.8
+

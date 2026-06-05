@@ -148,6 +148,12 @@ async def upload_video(
         metrics = JAMMetrics(session_id=session.id)
         db.add(metrics)
         
+    metrics.accuracy_score = analysis.get("accuracy_score", 0)
+    metrics.transcript_confidence = analysis.get("transcript_confidence", 0)
+    metrics.semantic_similarity_score = analysis.get("semantic_similarity_score", 0)
+    metrics.original_transcript = analysis.get("original_transcript", "")
+    metrics.corrected_transcript = analysis.get("corrected_transcript", "")
+        
     metrics.fluency_score = analysis.get("fluency_score", 0)
     metrics.grammar_score = analysis.get("grammar_score", 0)
     metrics.pronunciation_score = analysis.get("pronunciation_score", 0)
@@ -206,16 +212,8 @@ def get_history(
     
     history_items = []
     for s in sessions:
-        # If metrics exist, calculate average score
-        overall_score = 0
-        if s.metrics:
-            overall_score = int(
-                (s.metrics.fluency_score + 
-                 s.metrics.grammar_score + 
-                 s.metrics.pronunciation_score + 
-                 s.metrics.confidence_score + 
-                 s.metrics.communication_score) / 5
-            )
+        # If metrics exist, retrieve accuracy_score directly
+        overall_score = s.metrics.accuracy_score if s.metrics else 0
         history_items.append({
             "id": s.id,
             "topic": s.topic,
@@ -241,15 +239,7 @@ def get_leaderboard(db: Session = Depends(get_db)):
             
         total_score_sum = 0
         for s in scored_sessions:
-            m = s.metrics
-            avg_session_score = (
-                m.fluency_score + 
-                m.grammar_score + 
-                m.pronunciation_score + 
-                m.confidence_score + 
-                m.communication_score
-            ) / 5
-            total_score_sum += avg_session_score
+            total_score_sum += s.metrics.accuracy_score
             
         user_average = round(total_score_sum / len(scored_sessions), 1)
         leaderboard.append({

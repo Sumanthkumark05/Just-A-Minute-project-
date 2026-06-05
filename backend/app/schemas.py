@@ -37,6 +37,13 @@ class TopicResponse(BaseModel):
     category: str
 
 class JAMMetricsBase(BaseModel):
+    # New Accuracy Analysis Metrics
+    accuracy_score: int = 0
+    transcript_confidence: int = 0
+    semantic_similarity_score: int = 0
+    original_transcript: Optional[str] = None
+    corrected_transcript: Optional[str] = None
+
     fluency_score: int
     grammar_score: int
     pronunciation_score: int

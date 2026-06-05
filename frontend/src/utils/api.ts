@@ -19,18 +19,34 @@ export function logout() {
   }
 }
 
-async function fetchAPI(endpoint: string, options: RequestInit = {}) {
+async function fetchAPI(endpoint: string, options: RequestInit & { timeout?: number } = {}) {
+  const { timeout, ...fetchOptions } = options;
   const token = getToken();
-  const headers = new Headers(options.headers || {});
+  const headers = new Headers(fetchOptions.headers || {});
 
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const res = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    headers,
-  });
+  const controller = new AbortController();
+  const timeoutMs = timeout ?? 15000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${endpoint}`, {
+      ...fetchOptions,
+      headers,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === "AbortError") {
+      throw new Error("Request timed out. Please try again.");
+    }
+    throw new Error(err.message || "Failed to connect to the server.");
+  }
 
   if (res.status === 401) {
     logout();
@@ -110,6 +126,7 @@ export const api = {
     return fetchAPI(`/jam/session/${sessionId}/upload`, {
       method: "POST",
       body: formData, // Fetch automatically sets content-type for FormData
+      timeout: 120000, // 2 minutes timeout for video upload
     });
   },
 

@@ -109,7 +109,7 @@ export default function Home() {
   }, [isRecording, recordingTimer]);
 
   // Profiles loading helper
-  const loadUserProfile = async () => {
+  const loadUserProfile = async (rethrowError = false) => {
     try {
       const profile = await api.getMe();
       setUser(profile);
@@ -119,6 +119,9 @@ export default function Home() {
       api.logout();
       setUser(null);
       setCurrentScreen("auth");
+      if (rethrowError) {
+        throw err;
+      }
     }
   };
 
@@ -149,7 +152,7 @@ export default function Home() {
         // Automatically login after signup
         await api.login(email, password);
       }
-      await loadUserProfile();
+      await loadUserProfile(true);
     } catch (err: any) {
       setAuthError(err.message || "Authentication failed. Check your parameters.");
     } finally {
@@ -447,6 +450,7 @@ export default function Home() {
   const getRadarData = (metrics: any) => {
     if (!metrics) return [];
     return [
+      { subject: "Accuracy", A: metrics.accuracy_score || 0, fullMark: 100 },
       { subject: "Fluency", A: metrics.fluency_score, fullMark: 100 },
       { subject: "Grammar", A: metrics.grammar_score, fullMark: 100 },
       { subject: "Pronunciation", A: metrics.pronunciation_score, fullMark: 100 },
@@ -1037,6 +1041,12 @@ export default function Home() {
                 </span>
                 <h2 className="font-display font-extrabold text-xl text-white mt-1.5">"{activeSession.topic}"</h2>
                 <p className="text-[10px] text-zinc-400 mt-1">Completed: {new Date(activeSession.created_at).toLocaleString()}</p>
+                {activeSession.metrics?.transcript_confidence < 70 && (
+                  <div className="mt-2 inline-flex items-center gap-1.5 bg-red-500/10 border border-red-500/20 px-2.5 py-1 rounded-lg">
+                    <AlertTriangle className="h-3.5 w-3.5 text-red-400" />
+                    <span className="text-[10px] font-bold text-red-400">Low Audio Confidence ({activeSession.metrics.transcript_confidence}%). AI Evaluation may be inaccurate.</span>
+                  </div>
+                )}
               </div>
 
               <div className="flex gap-3 w-full sm:w-auto shrink-0">
@@ -1056,11 +1066,39 @@ export default function Home() {
               </div>
             </div>
 
+            {/* Skill Score Breakdown Grid */}
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+              <div className="glass rounded-xl border border-white/5 p-4 text-center">
+                <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold">Weighted Score</p>
+                <h3 className="font-display text-2xl font-black mt-1.5 text-primary">{activeSession.metrics.accuracy_score}%</h3>
+              </div>
+              <div className="glass rounded-xl border border-white/5 p-4 text-center">
+                <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold">Audio Confidence</p>
+                <h3 className="font-display text-2xl font-bold mt-1.5 text-white">{activeSession.metrics.transcript_confidence}%</h3>
+              </div>
+              <div className="glass rounded-xl border border-white/5 p-4 text-center">
+                <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold">Fluency Score</p>
+                <h3 className="font-display text-2xl font-bold mt-1.5 text-white">{activeSession.metrics.fluency_score}%</h3>
+              </div>
+              <div className="glass rounded-xl border border-white/5 p-4 text-center">
+                <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold">Grammar Score</p>
+                <h3 className="font-display text-2xl font-bold mt-1.5 text-white">{activeSession.metrics.grammar_score}%</h3>
+              </div>
+              <div className="glass rounded-xl border border-white/5 p-4 text-center">
+                <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold">Relevance Score</p>
+                <h3 className="font-display text-2xl font-bold mt-1.5 text-white">{activeSession.metrics.semantic_similarity_score}%</h3>
+              </div>
+              <div className="glass rounded-xl border border-white/5 p-4 text-center">
+                <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-bold">Pronunciation</p>
+                <h3 className="font-display text-2xl font-bold mt-1.5 text-white">{activeSession.metrics.pronunciation_score}%</h3>
+              </div>
+            </div>
+
             {/* Averages & Radar split */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               
               {/* Score radar chart */}
-              <div className="glass rounded-2xl border border-white/5 p-6 h-[340px] flex flex-col">
+              <div className="glass rounded-2xl border border-white/5 p-6 h-[460px] flex flex-col">
                 <h3 className="font-display text-sm font-bold text-white mb-2">Speech Skill Metrics</h3>
                 <div className="flex-1 min-h-0">
                   <ResponsiveContainer width="100%" height="100%">
@@ -1075,7 +1113,7 @@ export default function Home() {
               </div>
 
               {/* Emotion breakdown */}
-              <div className="glass rounded-2xl border border-white/5 p-6 h-[340px] flex flex-col">
+              <div className="glass rounded-2xl border border-white/5 p-6 h-[460px] flex flex-col">
                 <h3 className="font-display text-sm font-bold text-white mb-2">Emotion Analysis</h3>
                 <div className="flex-1 min-h-0 flex items-center justify-center">
                   <ResponsiveContainer width="100%" height="100%">
@@ -1106,7 +1144,7 @@ export default function Home() {
               </div>
 
               {/* Filler word frequency */}
-              <div className="glass rounded-2xl border border-white/5 p-6 h-[340px] flex flex-col">
+              <div className="glass rounded-2xl border border-white/5 p-6 h-[460px] flex flex-col">
                 <h3 className="font-display text-sm font-bold text-white mb-2">Filler Word Frequency</h3>
                 <div className="flex-1 min-h-0">
                   {(() => {
@@ -1131,15 +1169,47 @@ export default function Home() {
                     }
 
                     return (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={chartData}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                          <XAxis dataKey="word" stroke="#a1a1aa" fontSize={10} />
-                          <YAxis stroke="#a1a1aa" fontSize={10} allowDecimals={false} />
-                          <Tooltip contentStyle={{ backgroundColor: "#18181b", border: "1px solid #27272a", borderRadius: "8px" }} />
-                          <Bar dataKey="count" fill="#ec4899" radius={[4, 4, 0, 0]} maxBarSize={30} />
-                        </BarChart>
-                      </ResponsiveContainer>
+                      <div className="flex flex-col h-full space-y-4">
+                        {/* Bar Chart Section */}
+                        <div className="h-[180px] min-h-0">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={chartData}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                              <XAxis dataKey="word" stroke="#a1a1aa" fontSize={10} />
+                              <YAxis stroke="#a1a1aa" fontSize={10} allowDecimals={false} />
+                              <Tooltip contentStyle={{ backgroundColor: "#18181b", border: "1px solid #27272a", borderRadius: "8px" }} />
+                              <Bar dataKey="count" fill="#ec4899" radius={[4, 4, 0, 0]} maxBarSize={25} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                        
+                        {/* List/Table Section */}
+                        <div className="flex-1 overflow-y-auto pr-1 border-t border-white/5 pt-3">
+                          <table className="w-full text-left text-xs">
+                            <thead>
+                              <tr className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">
+                                <th className="pb-2">Filler Word</th>
+                                <th className="pb-2 text-center">Count</th>
+                                <th className="pb-2 text-right">Freq / Min</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5 text-zinc-300">
+                              {chartData.map((item) => {
+                                const wpm = activeSession.metrics?.words_per_minute || 0;
+                                const totalWords = (activeSession.metrics?.original_transcript || activeSession.transcript || "").split(/\s+/).filter(Boolean).length;
+                                const freq = totalWords > 0 && wpm > 0 ? ((item.count / totalWords) * wpm).toFixed(1) : "0.0";
+                                return (
+                                  <tr key={item.word} className="hover:bg-white/5">
+                                    <td className="py-2 font-mono text-pink-400 font-semibold">{item.word}</td>
+                                    <td className="py-2 text-center font-bold text-white">{item.count}</td>
+                                    <td className="py-2 text-right font-semibold text-zinc-400">{freq}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
                     );
                   })()}
                 </div>
@@ -1154,8 +1224,13 @@ export default function Home() {
               <div className="glass rounded-2xl border border-white/5 p-6 lg:col-span-2 flex flex-col h-[340px]">
                 <h3 className="font-display text-sm font-bold text-white mb-3">Speech Transcript</h3>
                 <div className="flex-1 overflow-y-auto pr-2">
-                  <p className="text-xs text-zinc-300 leading-relaxed bg-zinc-950/60 p-4 rounded-xl border border-white/5">
-                    {activeSession.transcript}
+                  <p className="text-[10px] text-zinc-400 mb-1 font-semibold uppercase tracking-wider">Original Audio Transcript</p>
+                  <p className="text-xs text-zinc-300 leading-relaxed bg-zinc-950/60 p-4 rounded-xl border border-white/5 mb-3">
+                    {activeSession.metrics.original_transcript || activeSession.transcript}
+                  </p>
+                  <p className="text-[10px] text-zinc-400 mb-1 font-semibold uppercase tracking-wider text-primary">Contextually Corrected Transcript</p>
+                  <p className="text-xs text-zinc-200 leading-relaxed bg-primary/5 p-4 rounded-xl border border-primary/20">
+                    {activeSession.metrics.corrected_transcript || activeSession.transcript}
                   </p>
                   
                   <h4 className="text-xs font-bold text-white mt-4 mb-2">Speech Summary</h4>

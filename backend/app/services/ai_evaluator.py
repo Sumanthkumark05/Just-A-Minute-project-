@@ -9,14 +9,17 @@ logger = logging.getLogger("jam_analyzer")
 # Schema for structured Gemini evaluation output
 class GeminiEvaluationOutput(BaseModel):
     summary: str = Field(description="A concise summary of the speech content.")
+    original_transcript: str = Field(description="The original transcript provided, unmodified.")
+    corrected_transcript: str = Field(description="The transcript with obvious transcription errors corrected using context. Do not hallucinate words that were not spoken.")
+    semantic_similarity_score: int = Field(description="Score between 0 and 100 assessing how closely the spoken content matches the expected ideal answer for this topic.")
     key_points: List[str] = Field(description="List of 2-4 key arguments or points made by the speaker.")
     grammar_score: int = Field(description="Score between 0 and 100 assessing grammatical correctness and vocabulary usage.")
     communication_score: int = Field(description="Score between 0 and 100 assessing clarity, persuasion, structure, and pacing.")
     content_quality_score: int = Field(description="Score between 0 and 100 assessing the depth, structure, and quality of content.")
     topic_relevance_score: int = Field(description="Score between 0 and 100 assessing how closely the speech stuck to the specified topic.")
-    mistakes: List[str] = Field(description="List of specific grammatical errors, mispronunciations, or delivery hiccups detected in the transcript.")
+    mistakes: List[str] = Field(description="List of specific grammatical errors, mispronunciations, or delivery hiccups detected in the transcript. Explain why points were deducted.")
     strengths: List[str] = Field(description="List of 2-3 specific communication strengths observed.")
-    improvements: List[str] = Field(description="List of 2-3 actionable areas for improvement based on the delivery and transcript.")
+    improvements: List[str] = Field(description="Detailed actionable areas for improvement based on the delivery and transcript. Highlight transcript sections causing accuracy loss.")
     exercises: List[str] = Field(description="List of 2-3 targeted coaching exercises mapped directly to the areas of improvement.")
 
 def evaluate_speech_with_gemini(topic: str, category: str, transcript: str,
@@ -61,18 +64,20 @@ def evaluate_speech_with_gemini(topic: str, category: str, transcript: str,
         Topic: "{topic}"
         Category: "{category}"
         
-        Transcript:
+        Original Transcript:
         \"\"\"{transcript}\"\"\"
 
         Objective Delivery Metrics (Calculated via Local Audio & Video Tracking):
         {json.dumps(metrics_payload, indent=2)}
 
         Tasks:
-        1. Evaluate topic relevance: Did the speaker actually address the topic "{topic}" or did they deviate/ramble?
-        2. Evaluate content quality, structure, flow, and persuasiveness.
-        3. Evaluate grammar: Identify any syntax, tense, or phrasing errors in the transcript.
-        4. Synthesize local visual/audio metrics (WPM, filler count, pauses, eye contact, head pose) into deep, personalized feedback.
-        5. Provide constructive coaching suggestions, strengths, improvements, and specific speaking drills.
+        1. Contextual Correction: Compare the transcript against typical speech patterns for this topic. Automatically correct obvious transcription errors using context to produce a 'corrected_transcript'. Never hallucinate words that were not spoken. Generate feedback ONLY from the actual corrected transcript.
+        2. Semantic Similarity: Generate an internal 'ideal expected answer' for this topic. Calculate a 'semantic_similarity_score' (0-100) between the corrected transcript and your ideal expected answer. Consider synonyms, paraphrasing, and sentence restructuring. Ignore filler words.
+        3. Evaluate topic relevance: Did the speaker actually address the topic "{topic}" or did they deviate/ramble?
+        4. Evaluate content quality, structure, flow, and persuasiveness.
+        5. Evaluate grammar & pronunciation: Identify any syntax, tense, phrasing errors, incomplete sentences, or pronunciation issues in the transcript. Explain why points were deducted.
+        6. Synthesize local visual/audio metrics (WPM, filler count, pauses, transcript confidence) into deep, personalized feedback.
+        7. Provide constructive coaching suggestions, strengths, detailed improvements (highlighting transcript sections causing accuracy loss), and specific speaking drills.
 
         Your response MUST be valid JSON conforming exactly to the requested output schema.
         """

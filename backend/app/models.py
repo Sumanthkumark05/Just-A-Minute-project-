@@ -39,6 +39,14 @@ class JAMMetrics(Base):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     session_id = Column(String(36), ForeignKey("jam_sessions.id", ondelete="CASCADE"), unique=True, nullable=False)
+    
+    # New Accuracy Analysis Metrics
+    accuracy_score = Column(Integer, default=0)
+    transcript_confidence = Column(Integer, default=0)
+    semantic_similarity_score = Column(Integer, default=0)
+    original_transcript = Column(Text, nullable=True)
+    corrected_transcript = Column(Text, nullable=True)
+
     fluency_score = Column(Integer, default=0)
     grammar_score = Column(Integer, default=0)
     pronunciation_score = Column(Integer, default=0)

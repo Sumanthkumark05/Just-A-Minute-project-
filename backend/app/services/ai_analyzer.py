@@ -1,5 +1,6 @@
 import logging
 import time
+import re
 from typing import Dict, Any, List
 from app.config import settings
 from app.services.audio_processor import process_audio
@@ -7,6 +8,128 @@ from app.services.vision_processor import process_video
 from app.services.ai_evaluator import evaluate_speech_with_gemini
 
 logger = logging.getLogger("jam_analyzer")
+
+def calculate_local_semantic_relevance(transcript: str, topic: str, category: str) -> int:
+    """
+    Calculates a dynamic semantic relevance score (0-100) between the transcript and the topic
+    by comparing cleaned content words, ignoring filler words and common stopwords,
+    and estimating overlap.
+    """
+    if not transcript or not topic:
+        return 0
+        
+    filler_words = {"um", "uh", "like", "you", "know", "actually", "basically", "literally", "sort", "of", "kind"}
+    stopwords = {
+        "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "aren't", "as", "at",
+        "be", "because", "been", "before", "being", "below", "between", "both", "but", "by", "can't", "cannot", "could",
+        "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during", "each", "few", "for",
+        "from", "further", "had", "hadn't", "has", "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's",
+        "her", "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i", "i'd", "i'll", "i'm",
+        "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself", "let's", "me", "more", "most", "mustn't",
+        "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other", "ought", "our", "ours",
+        "ourselves", "out", "over", "own", "same", "shan't", "she", "she'd", "she'll", "she's", "should", "shouldn't",
+        "so", "some", "such", "than", "that", "that's", "the", "their", "theirs", "them", "themselves", "then", "there",
+        "there's", "these", "they", "they'd", "they'll", "they're", "they've", "this", "those", "through", "to", "too",
+        "under", "until", "up", "very", "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were", "weren't",
+        "what", "what's", "when", "when's", "where", "where's", "which", "while", "who", "who's", "whom", "why", "why's",
+        "with", "won't", "would", "wouldn't", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves"
+    }
+    
+    # Helper to extract clean content words
+    def get_content_words(text: str) -> List[str]:
+        words = re.findall(r"\b\w+\b", text.lower())
+        return [w for w in words if w not in filler_words and w not in stopwords]
+        
+    topic_words = set(get_content_words(topic))
+    category_words = set(get_content_words(category))
+    transcript_words = set(get_content_words(transcript))
+    
+    if not topic_words:
+        return 70  # default fallback if topic has no content words
+        
+    # Check overlap with topic words
+    topic_overlap = len(topic_words.intersection(transcript_words))
+    topic_match_ratio = topic_overlap / len(topic_words)
+    
+    # Check overlap with category words (adds context)
+    category_overlap = len(category_words.intersection(transcript_words))
+    category_match_ratio = category_overlap / len(category_words) if category_words else 0
+    
+    # Simple semantic expansion: basic synonym mappings for common topics
+    synonym_map = {
+        "job": {"work", "employment", "career", "occupation", "employee", "hiring", "worker"},
+        "jobs": {"work", "employment", "careers", "occupations", "employees", "hiring", "workers"},
+        "ai": {"artificial", "intelligence", "technology", "machine", "learning", "automation", "robot", "software"},
+        "education": {"learning", "school", "college", "university", "student", "teacher", "study", "academic"},
+        "online": {"digital", "remote", "virtual", "internet", "web", "zoom"},
+        "offline": {"physical", "classroom", "person", "traditional"},
+        "teamwork": {"collaboration", "cooperation", "together", "group", "collective", "partner"},
+        "sports": {"athletics", "games", "players", "fitness", "exercise", "physical"},
+        "climate": {"environment", "warming", "green", "carbon", "nature", "earth", "weather"}
+    }
+    
+    # Check synonym overlap
+    synonym_hits = 0
+    for tw in topic_words:
+        if tw in transcript_words:
+            continue
+        if tw in synonym_map:
+            if synonym_map[tw].intersection(transcript_words):
+                synonym_hits += 1
+                
+    adjusted_topic_overlap = topic_overlap + synonym_hits
+    adjusted_ratio = min(1.0, adjusted_topic_overlap / len(topic_words))
+    
+    if adjusted_ratio > 0:
+        score = 50 + int(adjusted_ratio * 40) + int(category_match_ratio * 10)
+    else:
+        score = 30
+        
+    return min(100, score)
+
+def get_insufficient_audio_response(message: str) -> Dict[str, Any]:
+    """
+    Returns a database-conforming dictionary with scores set to 0 and message as transcript
+    when audio quality safeguards are triggered.
+    """
+    return {
+        "original_transcript": message,
+        "corrected_transcript": message,
+        "transcript": message,
+        "summary": message,
+        "key_points": [],
+        
+        # Primary Database Metrics
+        "accuracy_score": 0,
+        "transcript_confidence": 0,
+        "semantic_similarity_score": 0,
+        
+        "fluency_score": 0,
+        "grammar_score": 0,
+        "pronunciation_score": 0,
+        "confidence_score": 0,
+        "communication_score": 0,
+        "words_per_minute": 0,
+        
+        # Detailed Sub-Metrics
+        "vocabulary_score": 0,
+        "speaking_pace_score": 0,
+        "eye_contact_score": 0,
+        "posture_score": 0,
+        "engagement_score": 0,
+        "content_quality_score": 0,
+        "topic_relevance_score": 0,
+        "dominant_emotion": "Neutral",
+        "emotion_stability_score": 0,
+        
+        # JSON stores
+        "filler_words": {},
+        "emotion_distribution": {},
+        "mistakes": [message],
+        "strengths": [],
+        "improvements": [],
+        "exercises": []
+    }
 
 def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str, Any]:
     """
@@ -25,20 +148,16 @@ def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str
         speech_results = process_audio(video_path)
     except Exception as e:
         logger.error(f"Speech processing failed: {e}")
-        # Build empty/mock speech results as recovery
-        speech_results = {
-            "transcript": "Audio transcription failed.",
-            "words_per_minute": 0,
-            "filler_words": {
-                "um": 0, "uh": 0, "ah": 0, "er": 0, "like": 0, "you know": 0,
-                "actually": 0, "basically": 0, "literally": 0, "sort of": 0, "kind of": 0
-            },
-            "pause_count": 0,
-            "pause_duration": 0.0,
-            "vocabulary_score": 50,
-            "speaking_pace_score": 50,
-            "duration": 60.0
-        }
+        return get_insufficient_audio_response("Audio quality insufficient for reliable evaluation.")
+
+    # 1.1 Apply Safeguards
+    transcript = speech_results.get("transcript", "").strip()
+    confidence = speech_results.get("transcript_confidence", 0)
+    
+    clean_text = re.sub(r"[^\w\s]", "", transcript).strip()
+    if not clean_text or transcript == "Audio transcription failed." or confidence < 40:
+        logger.warning(f"Audio Safeguard Triggered - Transcript empty: {not clean_text}, Confidence: {confidence}%")
+        return get_insufficient_audio_response("Audio quality insufficient for reliable evaluation.")
 
     # 2. Run local Video / Computer Vision processing
     try:
@@ -78,7 +197,6 @@ def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str
             
         except Exception as e:
             logger.error(f"Gemini evaluation failed: {e}. Falling back to local data-driven evaluator.")
-            # Fall back to local data-driven generator
     else:
         logger.warning("GEMINI_API_KEY is not set. Using local data-driven evaluator.")
 
@@ -89,7 +207,6 @@ def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str
     elapsed = time.time() - start_time
     logger.info(f"AI Pipeline completed in {elapsed:.2f}s using local data-driven fallback.")
     return final_report
-
 
 def combine_metrics(speech: Dict[str, Any], vision: Dict[str, Any], evaluation: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -105,14 +222,63 @@ def combine_metrics(speech: Dict[str, Any], vision: Dict[str, Any], evaluation: 
     # Clamp to max 98
     pronunciation_score = min(98, pronunciation_score)
 
+    # Calculate final accuracy score using weighted formula:
+    # - Transcript Confidence: 30%
+    # - Semantic Relevance to Topic: 30%
+    # - Fluency and Coherence: 20%
+    # - Grammar Quality: 10%
+    # - Pronunciation Clarity: 10%
+    transcript_conf = speech.get("transcript_confidence", 85)
+    semantic_sim = evaluation.get("semantic_similarity_score", 80)
+    grammar_score = evaluation.get("grammar_score", 80)
+    
+    accuracy_score = int(
+        (transcript_conf * 0.30) +
+        (semantic_sim * 0.30) +
+        (fluency_score * 0.20) +
+        (grammar_score * 0.10) +
+        (pronunciation_score * 0.10)
+    )
+    
+    logger.info("--- Weighted Score Calculation ---")
+    logger.info("Evaluation Inputs:")
+    logger.info(f"  Transcript Confidence: {transcript_conf}% (weight: 30%)")
+    logger.info(f"  Semantic Relevance: {semantic_sim}% (weight: 30%)")
+    logger.info(f"  Fluency Score: {fluency_score}% (weight: 20%)")
+    logger.info(f"  Grammar Score: {grammar_score}% (weight: 10%)")
+    logger.info(f"  Pronunciation Score: {pronunciation_score}% (weight: 10%)")
+    logger.info(f"Final Weighted Score: {accuracy_score}%")
+    logger.info("----------------------------------")
+
+    mistakes = list(evaluation.get("mistakes", []))
+
+    # Warnings logic - threshold updated to 70%
+    if transcript_conf < 70:
+        logger.warning(f"Low transcript confidence detected: {transcript_conf}%")
+        mistakes.append(f"WARNING: Transcript confidence is low ({transcript_conf}%). AI Evaluation may be inaccurate. Please ensure a quiet environment and clear microphone.")
+
+    # Format and append timestamped filler occurrences to mistakes list
+    filler_occurrences = speech.get("filler_occurrences", [])
+    for occ in filler_occurrences:
+        mistakes.append(f"Vocal filler '{occ['filler']}' spoken at {occ['start']:.1f}s - {occ['end']:.1f}s")
+
+    original_transcript = evaluation.get("original_transcript") or speech.get("raw_transcript") or speech.get("transcript", "")
+    corrected_transcript = evaluation.get("corrected_transcript") or speech.get("transcript", "")
+
     return {
-        "transcript": speech.get("transcript", ""),
+        "original_transcript": original_transcript,
+        "corrected_transcript": corrected_transcript,
+        "transcript": corrected_transcript,
         "summary": evaluation.get("summary", ""),
         "key_points": evaluation.get("key_points", []),
         
         # Primary Database Metrics
+        "accuracy_score": accuracy_score,
+        "transcript_confidence": transcript_conf,
+        "semantic_similarity_score": semantic_sim,
+        
         "fluency_score": fluency_score,
-        "grammar_score": evaluation.get("grammar_score", 80),
+        "grammar_score": grammar_score,
         "pronunciation_score": pronunciation_score,
         "confidence_score": vision.get("confidence_score", 75),
         "communication_score": evaluation.get("communication_score", 75),
@@ -132,19 +298,18 @@ def combine_metrics(speech: Dict[str, Any], vision: Dict[str, Any], evaluation: 
         # JSON stores
         "filler_words": speech.get("filler_words", {}),
         "emotion_distribution": vision.get("emotion_distribution", {}),
-        "mistakes": evaluation.get("mistakes", []),
+        "mistakes": mistakes,
         "strengths": evaluation.get("strengths", []),
         "improvements": evaluation.get("improvements", []),
         "exercises": evaluation.get("exercises", [])
     }
 
-
 def generate_local_evaluation(topic: str, category: str, speech: Dict[str, Any], vision: Dict[str, Any]) -> Dict[str, Any]:
     """
     Generates a highly personalized, data-driven assessment entirely in local Python code.
-    Analyzes actual metrics (filler count, WPM, eye contact, stability) and transcript to generate tailored feedback.
     """
     transcript = speech.get("transcript", "")
+    raw_transcript = speech.get("raw_transcript") or transcript
     wpm = speech.get("words_per_minute", 0)
     filler_counts = speech.get("filler_words", {})
     total_fillers = sum(filler_counts.values())
@@ -153,11 +318,20 @@ def generate_local_evaluation(topic: str, category: str, speech: Dict[str, Any],
     posture_score = vision.get("posture_score", 70)
     fidget_index = vision.get("fidgeting_index", 0.0)
     
+    logger.info("--- Running Local Fallback Evaluation ---")
+    logger.info("Evaluation Inputs:")
+    logger.info(f"  Topic: '{topic}'")
+    logger.info(f"  Category: '{category}'")
+    logger.info(f"  Transcript Length: {len(transcript)} chars")
+    logger.info(f"  Speaking Pace: {wpm} WPM")
+    logger.info(f"  Filler Count: {total_fillers}")
+    logger.info(f"  Eye Contact Score: {eye_score}%")
+    logger.info(f"  Posture Score: {posture_score}%")
+    
     # 1. Summary and Key Points generation based on actual transcription
     words_list = [w for w in transcript.split() if len(w) > 4]
     unique_words = list(set(words_list))
     
-    # Highlight top keywords to show we read the transcript
     keywords = sorted(unique_words, key=lambda w: transcript.lower().count(w.lower()), reverse=True)[:3]
     keywords_str = ", ".join([f"'{k}'" for k in keywords]) if keywords else f"'{topic}'"
 
@@ -175,14 +349,9 @@ def generate_local_evaluation(topic: str, category: str, speech: Dict[str, Any],
         key_points.append(f"Emphasized concepts surrounding {keywords_str}.")
 
     # 2. Score assessments
-    # Grammar estimation: deduct points for filler words, shorter speech, or vocabulary quality
     grammar_score = max(50, 95 - (total_fillers * 2) - max(0, 10 - len(unique_words) // 2))
-    
-    # Communication score: balance of fluency, content quality, and visual posture stability
     content_quality = max(50, 90 - max(0, 120 - wpm) // 3 - total_fillers)
-    topic_relevance = 90  # Default local estimation
     
-    # Communication is average of visual engagement and speech pacing
     communication_score = int(vision.get("engagement_score", 70) * 0.4 + speech.get("speaking_pace_score", 70) * 0.4 + grammar_score * 0.2)
 
     # 3. Dynamic Strengths, Mistakes, and Recommendations
@@ -237,13 +406,18 @@ def generate_local_evaluation(topic: str, category: str, speech: Dict[str, Any],
     if len(exercises) == 0:
         exercises.append("Mirror training: Speak for 1 minute while observing your posture in a mirror.")
 
+    local_relevance = calculate_local_semantic_relevance(transcript, topic, category)
+
     return {
+        "original_transcript": raw_transcript,
+        "corrected_transcript": transcript,
+        "semantic_similarity_score": local_relevance,
         "summary": summary,
         "key_points": key_points,
         "grammar_score": grammar_score,
         "communication_score": communication_score,
         "content_quality_score": content_quality,
-        "topic_relevance_score": topic_relevance,
+        "topic_relevance_score": local_relevance,
         "mistakes": mistakes,
         "strengths": strengths,
         "improvements": improvements,
