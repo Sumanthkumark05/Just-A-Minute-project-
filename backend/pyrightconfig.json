@@ -1,4 +1,8 @@
 {
   "venvPath": ".",
-  "venv": "venv"
+  "venv": "venv",
+  "exclude": [
+    "**/pyrefly_virtual/**",
+    "**/inmemory/**"
+  ]
 }
