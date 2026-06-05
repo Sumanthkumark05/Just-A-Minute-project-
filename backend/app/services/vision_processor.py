@@ -98,8 +98,7 @@ def process_video(video_path: str) -> Dict[str, Any]:
     """
     import av
     # Import mediapipe locally so dependencies are checked at call time
-    import mediapipe as mp
-    mp_face_mesh = mp.solutions.face_mesh
+    import mediapipe.python.solutions.face_mesh as mp_face_mesh
     
     logger.info(f"Opening video file for visual analysis: {video_path}")
     try:
@@ -148,11 +147,12 @@ def process_video(video_path: str) -> Dict[str, Any]:
             processed_count += 1
             # Convert PyAV VideoFrame directly to RGB numpy array
             rgb_frame = frame.to_ndarray(format='rgb24')
-            results = face_mesh.process(rgb_frame)
+            results: Any = face_mesh.process(rgb_frame)
             
             if results.multi_face_landmarks:
                 face_detected_count += 1
                 landmarks = results.multi_face_landmarks[0]
+                gaze_ok = False
                 
                 # 1. Gaze / Eye Contact tracking (refined landmarks 468+ must be present)
                 if len(landmarks.landmark) >= 478:
