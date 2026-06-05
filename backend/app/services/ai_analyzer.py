@@ -49,7 +49,6 @@ def calculate_local_semantic_relevance(transcript: str, topic: str, category: st
         
     # Check overlap with topic words
     topic_overlap = len(topic_words.intersection(transcript_words))
-    topic_match_ratio = topic_overlap / len(topic_words)
     
     # Check overlap with category words (adds context)
     category_overlap = len(category_words.intersection(transcript_words))

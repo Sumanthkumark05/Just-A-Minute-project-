@@ -1,5 +1,4 @@
 import logging
-import time
 from typing import Dict, Any, List, Tuple
 import cv2
 import numpy as np
@@ -55,11 +54,11 @@ def estimate_head_pose(landmarks: Any, img_w: int, img_h: int) -> Tuple[float, f
 
     # Fetch corresponding 2D points from face mesh (index mapping)
     key_indices = [4, 152, 33, 263, 61, 291]
-    image_points = []
+    image_points_list = []
     for idx in key_indices:
         lm = landmarks.landmark[idx]
-        image_points.append((lm.x * img_w, lm.y * img_h))
-    image_points = np.array(image_points, dtype=np.float32)
+        image_points_list.append((lm.x * img_w, lm.y * img_h))
+    image_points = np.array(image_points_list, dtype=np.float32)
 
     # Camera intrinsic properties (approximate using image dimensions)
     focal_length = img_w
@@ -112,7 +111,8 @@ def process_video(video_path: str) -> Dict[str, Any]:
         
     width = video_stream.width
     height = video_stream.height
-    fps = float(video_stream.average_rate) or 30.0
+    avg_rate = video_stream.average_rate
+    fps = float(avg_rate) if avg_rate is not None else 30.0
     
     # Run at 5 FPS: process every Nth frame
     sample_rate = max(1, int(fps / 5))

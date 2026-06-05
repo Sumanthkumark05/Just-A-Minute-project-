@@ -2,7 +2,7 @@ import os
 import subprocess
 import logging
 import re
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 import scipy.io.wavfile as wavfile
 import numpy as np
 import noisereduce as nr
@@ -240,7 +240,7 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
     # Safe transcript reconstitution:
     # Build the transcript by joining tokens. Since faster-whisper tokens may or may not contain leading spaces,
     # we can process them sequentially, adding a space between tokens if needed.
-    reconstructed_tokens = []
+    reconstructed_tokens: List[str] = []
     for token in transcript_parts:
         if not reconstructed_tokens:
             reconstructed_tokens.append(token)
@@ -423,7 +423,7 @@ def process_audio(video_path: str) -> Dict[str, Any]:
         logger.info(f"Raw transcript: \"{metrics.get('raw_transcript', '')}\"")
         logger.info(f"Cleaned transcript: \"{metrics.get('transcript', '')}\"")
         logger.info(f"Filler-word extraction results: {metrics.get('filler_words', {})}")
-        logger.info(f"--- Audio Processing Pipeline Complete ---")
+        logger.info("--- Audio Processing Pipeline Complete ---")
         return metrics
     except Exception as e:
         logger.error(f"Error processing speech: {e}")
@@ -431,7 +431,7 @@ def process_audio(video_path: str) -> Dict[str, Any]:
         if audio_path and os.path.exists(audio_path):
             try:
                 os.remove(audio_path)
-            except:
+            except Exception:
                 pass
         raise e
     finally:
@@ -439,5 +439,5 @@ def process_audio(video_path: str) -> Dict[str, Any]:
         if audio_path and os.path.exists(audio_path):
             try:
                 os.remove(audio_path)
-            except:
+            except Exception:
                 pass

@@ -85,7 +85,7 @@ def evaluate_speech_with_gemini(topic: str, category: str, transcript: str,
         logger.info("Calling Gemini 2.5 Flash for deep speech evaluation...")
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[prompt],
+            contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=GeminiEvaluationOutput,
@@ -93,7 +93,10 @@ def evaluate_speech_with_gemini(topic: str, category: str, transcript: str,
             )
         )
 
-        result = json.loads(response.text)
+        res_text = response.text
+        if not res_text:
+            raise ValueError("Empty response received from Gemini API")
+        result = json.loads(res_text)
         logger.info("Successfully received AI evaluation report from Gemini.")
         return result
 
