@@ -1,0 +1,8 @@
+{
+  "venvPath": "backend",
+  "venv": "venv",
+  "exclude": [
+    "**/pyrefly_virtual/**",
+    "**/inmemory/**"
+  ]
+}
