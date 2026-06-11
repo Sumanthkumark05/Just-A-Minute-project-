@@ -2,10 +2,12 @@ import os
 import subprocess
 import logging
 import re
+import math
 from typing import Dict, Any, List
 import scipy.io.wavfile as wavfile
 import numpy as np
 import noisereduce as nr
+import webrtcvad
 
 logger = logging.getLogger("jam_analyzer")
 
@@ -17,23 +19,94 @@ def get_whisper_model():
     if _whisper_model is None:
         try:
             from faster_whisper import WhisperModel
-            logger.info("Initializing faster-whisper model (base, cpu, int8)...")
-            # Using 'large-v3' model for highest transcription accuracy
-            # Compute type 'int8' optimizes execution on Intel Core CPUs
-            _whisper_model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+            import ctranslate2
+            
+            try:
+                cuda_available = ctranslate2.get_cuda_device_count() > 0
+            except Exception:
+                cuda_available = False
+                
+            device = "cuda" if cuda_available else "cpu"
+            compute_type = "float16" if cuda_available else "int8"
+            
+            logger.info(f"Initializing faster-whisper model (large-v3, device={device}, compute_type={compute_type})...")
+            _whisper_model = WhisperModel("large-v3", device=device, compute_type=compute_type)
         except Exception as e:
             logger.error(f"Failed to load WhisperModel: {e}")
             raise e
     return _whisper_model
 
+def run_webrtc_vad(audio_path: str, aggressiveness: int = 2) -> Dict[str, Any]:
+    """
+    Runs WebRTC VAD on the audio file (must be 16kHz 16-bit mono PCM).
+    Returns speech_duration, silence_duration, and total_duration.
+    """
+    try:
+        vad = webrtcvad.Vad(aggressiveness)
+        sample_rate, data = wavfile.read(audio_path)
+        
+        # Ensure data is 16-bit PCM format
+        if data.dtype != np.int16:
+            if data.dtype == np.float32 or data.dtype == np.float64:
+                data = (data * 32767).astype(np.int16)
+            else:
+                data = data.astype(np.int16)
+                
+        raw_bytes = data.tobytes()
+        
+        # 30 ms frame at 16kHz = 480 samples = 960 bytes
+        frame_duration_ms = 30
+        frame_size = int(sample_rate * frame_duration_ms / 1000)
+        frame_bytes_len = frame_size * 2
+        
+        total_frames = len(raw_bytes) // frame_bytes_len
+        speech_frames = 0
+        silence_frames = 0
+        
+        for i in range(total_frames):
+            frame = raw_bytes[i*frame_bytes_len : (i+1)*frame_bytes_len]
+            # Avoid checking short trailing frame
+            if len(frame) == frame_bytes_len:
+                try:
+                    is_speech = vad.is_speech(frame, sample_rate)
+                    if is_speech:
+                        speech_frames += 1
+                    else:
+                        silence_frames += 1
+                except Exception:
+                    pass
+                    
+        speech_duration = speech_frames * (frame_duration_ms / 1000.0)
+        silence_duration = silence_frames * (frame_duration_ms / 1000.0)
+        
+        logger.info(f"WebRTC VAD: speech={speech_duration:.2f}s, silence={silence_duration:.2f}s")
+        return {
+            "speech_duration": round(speech_duration, 2),
+            "silence_duration": round(silence_duration, 2),
+            "total_duration": round(speech_duration + silence_duration, 2)
+        }
+    except Exception as e:
+        logger.warning(f"VAD failed: {e}. Using fallback values.")
+        # Fallback to simple amplitude-based estimation if VAD crashes
+        return {
+            "speech_duration": 0.0,
+            "silence_duration": 0.0,
+            "total_duration": 0.0
+        }
+
 def extract_audio(video_path: str) -> str:
     """
-    Extracts the audio channel from a video file into a 16kHz mono WAV file using FFmpeg.
+    Extracts the audio channel from a video file into a 16kHz mono WAV file using FFmpeg,
+    and applies noisereduce noise reduction.
     """
     audio_path = os.path.splitext(video_path)[0] + ".wav"
     
+    # Overwrite if exists to support new recordings in the same session
     if os.path.exists(audio_path):
-        return audio_path
+        try:
+            os.remove(audio_path)
+        except Exception as e:
+            logger.warning(f"Could not remove old audio file: {e}")
 
     logger.info(f"Extracting audio from {video_path} to {audio_path}...")
     try:
@@ -46,33 +119,28 @@ def extract_audio(video_path: str) -> str:
             "-ac", "1",
             audio_path
         ]
-        # Run FFmpeg silently
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
+            logger.error(f"FFmpeg extraction failed: {result.stderr}")
             raise Exception(f"FFmpeg error: {result.stderr}")
             
-        # Apply noise reduction
-        logger.info("Applying background noise reduction...")
         rate, data = wavfile.read(audio_path)
         
-        # Check if empty or corrupted
         if data.size == 0:
             raise ValueError("Extracted audio data is empty (0 samples).")
             
-        # Check maximum amplitude for silence detection (16-bit PCM has values up to 32768)
-        max_amplitude = np.abs(data).max()
-        duration = len(data) / rate
-        logger.info(f"Audio details - Duration: {duration:.2f}s, Sample Rate: {rate}Hz, Max Amplitude: {max_amplitude}")
-        
-        if max_amplitude < 100:
-            raise ValueError("Audio file is silent or volume is extremely low.")
+        # 1. Sound Noise Reduction
+        try:
+            logger.info("Applying spectral noise reduction to clean static background noise...")
+            # Reduce noise on 16kHz mono audio data
+            reduced_data = nr.reduce_noise(y=data, sr=rate)
+            wavfile.write(audio_path, rate, reduced_data.astype(data.dtype))
+        except Exception as e:
+            logger.warning(f"Noise reduction failed: {e}. Using original audio.")
             
-        reduced_noise = nr.reduce_noise(y=data, sr=rate, prop_decrease=0.8)
-        wavfile.write(audio_path, rate, reduced_noise)
-        
         return audio_path
     except FileNotFoundError:
-        logger.error("ffmpeg executable not found. Please install ffmpeg via homebrew ('brew install ffmpeg').")
+        logger.error("ffmpeg executable not found.")
         raise RuntimeError("ffmpeg not found")
     except Exception as e:
         logger.error(f"Audio extraction failed: {e}")
@@ -89,26 +157,15 @@ def count_filler_words(transcript: str) -> Dict[str, int]:
     Counts filler words in the transcript using case-insensitive regex matching.
     """
     fillers = {
-        "um": 0,
-        "uh": 0,
-        "ah": 0,
-        "er": 0,
-        "like": 0,
-        "you know": 0,
-        "actually": 0,
-        "basically": 0,
-        "literally": 0,
-        "sort of": 0,
-        "kind of": 0
+        "um": 0, "uh": 0, "ah": 0, "er": 0, "like": 0,
+        "you know": 0, "actually": 0, "basically": 0,
+        "literally": 0, "sort of": 0, "kind of": 0
     }
     if not transcript:
         return fillers
         
-    # Replace punctuation with spaces to prevent boundary issues, keep single quotes for contractions
     clean_text = re.sub(r"[^\w\s']", " ", transcript).lower()
-    # Normalize whitespace
     clean_text = re.sub(r"\s+", " ", clean_text).strip()
-    # Add boundary spaces
     text_with_spaces = f" {clean_text} "
     
     patterns = {
@@ -125,35 +182,23 @@ def count_filler_words(transcript: str) -> Dict[str, int]:
         "kind of": r"\bkind\s+of\b"
     }
     
-    logger.info(f"Running filler word regex search on transcript of length {len(transcript)}...")
-    logger.info(f"Transcript content: \"{transcript}\"")
     for word, pattern in patterns.items():
         matches = re.findall(pattern, text_with_spaces)
         fillers[word] = len(matches)
-        if len(matches) > 0:
-            logger.info(f"Detected filler word: '{word}' -> count: {len(matches)}")
             
     return fillers
 
 def clean_fillers_from_transcript(raw_transcript: str) -> str:
     """
-    Removes filler words and their repeat variations from the transcript,
-    cleaning up any resulting punctuation/spacing issues.
+    Removes filler words and their repeat variations from the transcript.
     """
     if not raw_transcript:
         return ""
         
     patterns = [
-        r"\bu+m+\b",
-        r"\bu+h+\b",
-        r"\be+r+\b",
-        r"\ba+h+\b",
-        r"\blike\b",
-        r"\byou\s+know\b",
-        r"\bactually\b",
-        r"\bbasically\b",
-        r"\bliterally\b",
-        r"\bkind\s+of\b",
+        r"\bu+m+\b", r"\bu+h+\b", r"\be+r+\b", r"\ba+h+\b",
+        r"\blike\b", r"\byou\s+know\b", r"\bactually\b",
+        r"\bbasically\b", r"\bliterally\b", r"\bkind\s+of\b",
         r"\bsort\s+of\b"
     ]
     
@@ -161,46 +206,48 @@ def clean_fillers_from_transcript(raw_transcript: str) -> str:
     for pattern in patterns:
         cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
     
-    # Clean up spacing and punctuation
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = re.sub(r"\s+([.,!?;:])", r"\1", cleaned)
-    
-    # Clean up duplicate punctuation, e.g. ", , ," -> ","
     cleaned = re.sub(r"(?:\s*,\s*)+", ", ", cleaned)
     cleaned = re.sub(r"(?:\s*\.\s*)+", ". ", cleaned)
     cleaned = re.sub(r",\s*\.", ".", cleaned)
-    
-    # Clean up leading/trailing punctuation and spaces
     cleaned = re.sub(r"^[.,!?;:]\s*", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
-
-def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict[str, Any]:
+def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float, vad_results: Dict[str, Any] = None) -> Dict[str, Any]:
     """
-    Calculates detailed speech metrics from timestamped words.
+    Calculates detailed speech metrics from timestamped words and VAD results.
     """
+    if vad_results is None:
+        vad_results = {"speech_duration": duration, "silence_duration": 0.0}
     total_words_count = len(words)
-    if total_words_count == 0 or duration == 0:
+    speech_dur = vad_results.get("speech_duration", duration)
+    silence_dur = vad_results.get("silence_duration", 0.0)
+    
+    if speech_dur <= 0:
+        speech_dur = duration if duration > 0 else 1.0
+
+    if total_words_count == 0:
         return {
             "raw_transcript": "",
             "transcript": "",
             "words_per_minute": 0,
+            "speech_duration": speech_dur,
+            "silence_duration": silence_dur,
             "filler_words": {
                 "um": 0, "uh": 0, "ah": 0, "er": 0, "like": 0, "you know": 0,
                 "actually": 0, "basically": 0, "literally": 0, "sort of": 0, "kind of": 0
             },
             "pause_count": 0,
-            "pause_duration": 0.0,
+            "pause_duration": round(silence_dur, 2),
             "vocabulary_score": 0,
             "speaking_pace_score": 0,
             "filler_occurrences": []
         }
 
-    # Reconstruct transcript and extract cleaned words list
     transcript_parts = []
     clean_words = []
-    
     pauses_count = 0
     total_pause_duration = 0.0
     prev_end = 0.0
@@ -218,7 +265,6 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
         if cleaned:
             clean_words.append(cleaned)
             
-            # Sequence checking for "you know" to advance the index correctly in transcript parts
             if cleaned == "you" and i + 1 < len(words):
                 next_cleaned = clean_word(words[i+1]["word"])
                 if next_cleaned == "know":
@@ -227,7 +273,6 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
                     end = words[i+1]["end"]
                     i += 1
             
-            # Pause detection between words (gap > 1.5 seconds)
             if prev_end > 0:
                 gap = start - prev_end
                 if gap > 1.5:
@@ -237,9 +282,6 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
             prev_end = end
         i += 1
 
-    # Safe transcript reconstitution:
-    # Build the transcript by joining tokens. Since faster-whisper tokens may or may not contain leading spaces,
-    # we can process them sequentially, adding a space between tokens if needed.
     reconstructed_tokens: List[str] = []
     for token in transcript_parts:
         if not reconstructed_tokens:
@@ -258,13 +300,10 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
                 reconstructed_tokens.append(token)
                 
     raw_transcript = "".join(reconstructed_tokens).strip()
-    # Normalize double spaces if any
     raw_transcript = re.sub(r"\s+", " ", raw_transcript)
     
-    # Calculate robust filler word counts from the raw transcript
     filler_counts = count_filler_words(raw_transcript)
     
-    # Extract timestamped filler word occurrences
     filler_occurrences = []
     idx = 0
     while idx < len(words):
@@ -272,7 +311,6 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
         raw_w = w_data["word"]
         clean_w = clean_word(raw_w)
         
-        # Check multi-word fillers first
         is_multi = False
         if idx + 1 < len(words):
             w_data_next = words[idx+1]
@@ -291,16 +329,10 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
                 continue
                 
         if not is_multi:
-            # Check single word fillers
             for filler_key, pattern in [
-                ("um", r"^u+m+$"),
-                ("uh", r"^u+h+$"),
-                ("er", r"^e+r+$"),
-                ("ah", r"^a+h+$"),
-                ("like", r"^like$"),
-                ("actually", r"^actually$"),
-                ("basically", r"^basically$"),
-                ("literally", r"^literally$")
+                ("um", r"^u+m+$"), ("uh", r"^u+h+$"), ("er", r"^e+r+$"),
+                ("ah", r"^a+h+$"), ("like", r"^like$"), ("actually", r"^actually$"),
+                ("basically", r"^basically$"), ("literally", r"^literally$")
             ]:
                 if re.match(pattern, clean_w, re.IGNORECASE):
                     filler_occurrences.append({
@@ -311,23 +343,17 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
                     break
             idx += 1
 
-    # Clean transcript of fillers
     cleaned_transcript = clean_fillers_from_transcript(raw_transcript)
     
-    # Calculate WPM based on actual speaking time (total duration minus long pause gaps)
-    speaking_time = duration - total_pause_duration
-    if speaking_time < 5.0:
-        speaking_time = duration  # fallback to avoid division by near-zero or negative
-        
-    wpm = int((total_words_count / speaking_time) * 60)
+    # Calculate WPM based on exact speech duration
+    wpm = int((total_words_count / speech_dur) * 60)
     
-    # Speaking Pace Score: optimal is between 120 and 150 WPM
+    # Target pace 135 WPM
     target_pace = 135
     speaking_pace_score = max(30, int(100 - abs(wpm - target_pace) * 1.5))
     if wpm == 0:
         speaking_pace_score = 0
         
-    # Vocabulary Richness Score (Type-Token Ratio)
     unique_words_count = len(set(clean_words))
     ttr = (unique_words_count / len(clean_words)) * 100 if clean_words else 0
     vocabulary_score = min(100, max(10, int(ttr * 1.6)))
@@ -336,6 +362,8 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
         "raw_transcript": raw_transcript,
         "transcript": cleaned_transcript,
         "words_per_minute": wpm,
+        "speech_duration": round(speech_dur, 2),
+        "silence_duration": round(silence_dur, 2),
         "filler_words": filler_counts,
         "pause_count": pauses_count,
         "pause_duration": round(total_pause_duration, 2),
@@ -346,45 +374,51 @@ def analyze_speech_metrics(words: List[Dict[str, Any]], duration: float) -> Dict
 
 def process_audio(video_path: str) -> Dict[str, Any]:
     """
-    Extracts audio and runs the transcription pipeline.
+    Extracts audio, applies VAD and noise reduction, then runs transcription.
     """
     uploaded_filename = os.path.basename(video_path)
-    logger.info(f"--- Audio Processing Pipeline Start for file: {uploaded_filename} ---")
+    logger.info(f"--- Audio Processing Overhaul for file: {uploaded_filename} ---")
     audio_path = None
     try:
         audio_path = extract_audio(video_path)
-        logger.info(f"Processed audio path: {audio_path}")
         
+        # 1. Run WebRTC VAD
+        vad_results = run_webrtc_vad(audio_path, aggressiveness=2)
+        
+        # 2. Get Whisper Model
         model = get_whisper_model()
         
-        logger.info("Transcribing audio file...")
+        logger.info("Transcribing audio file with faster-whisper...")
         segments, info = model.transcribe(
             audio_path,
             beam_size=5,
             word_timestamps=True,
+            vad_filter=True, # Secondary Silero VAD filtering
+            vad_parameters=dict(
+                threshold=0.3,
+                min_speech_duration_ms=250,
+                max_speech_duration_s=float('inf'),
+                min_silence_duration_ms=500,
+                speech_pad_ms=400
+            ),
             initial_prompt="Uh, um, er, ah, okay. So, like, you know, actually, basically, literally, sort of, kind of."
         )
         
-        # Log basic info
         duration = info.duration
-        logger.info(f"Whisper audio duration detected: {duration:.2f}s")
-        
+        if duration <= 0:
+            rate, data = wavfile.read(audio_path)
+            duration = len(data) / rate
+            
         all_words = []
         total_confidence = 0.0
         word_count_with_conf = 0
-        
         segment_count = 0
         total_segment_confidence = 0.0
         
         for segment in segments:
             segment_count += 1
-            # Calculate segment logprob confidence fallback
-            import math
             seg_prob = math.exp(max(-10.0, segment.avg_logprob))
             total_segment_confidence += seg_prob
-            
-            logger.info(f"Segment #{segment_count} text: '{segment.text}'")
-            logger.info(f"Segment #{segment_count} raw logprob: {segment.avg_logprob:.4f} (estimated confidence: {seg_prob * 100:.2f}%)")
             
             if segment.words:
                 for word in segment.words:
@@ -397,45 +431,51 @@ def process_audio(video_path: str) -> Dict[str, Any]:
                     })
                     total_confidence += word_prob
                     word_count_with_conf += 1
-                    logger.debug(f"  Word: '{word.word}' -> probability: {word_prob:.4f}")
         
-        # Calculate robust average confidence
+        probs = []
+        segment_prob = 0.0
+        word_prob = 0.0
+        
+        if segment_count > 0:
+            segment_prob = total_segment_confidence / segment_count
+            probs.append(segment_prob)
         if word_count_with_conf > 0:
-            raw_avg_prob = total_confidence / word_count_with_conf
-            confidence_source = "word-level probability"
-        elif segment_count > 0:
-            raw_avg_prob = total_segment_confidence / segment_count
-            confidence_source = "segment-level logprob"
+            word_prob = total_confidence / word_count_with_conf
+            probs.append(word_prob)
+            
+        if probs:
+            raw_avg_prob = max(probs)
         else:
             raw_avg_prob = 0.0
-            confidence_source = "no speech detected"
             
-        # Apply power-law boost: confidence = 100 * (raw_avg_prob ** 0.35)
+        # Boost confidence score
         raw_avg_prob_clamped = max(0.0, min(1.0, raw_avg_prob))
         avg_confidence = 100.0 * (raw_avg_prob_clamped ** 0.35)
         
-        logger.info(f"Raw confidence calculation: raw_avg_prob = {raw_avg_prob:.4f} -> scaled avg_confidence = {avg_confidence:.2f}% (derived from {confidence_source})")
+        # Compute exact average amplitude (volume)
+        rate, wav_data = wavfile.read(audio_path)
+        avg_volume = float(np.mean(np.abs(wav_data)))
         
-        metrics = analyze_speech_metrics(all_words, duration)
+        # Override VAD durations with actual audio length if VAD returned zero but speech was transcribed
+        if len(all_words) > 0 and vad_results["speech_duration"] == 0:
+            vad_results["speech_duration"] = round(duration, 2)
+            vad_results["silence_duration"] = 0.0
+            vad_results["total_duration"] = round(duration, 2)
+            
+        metrics = analyze_speech_metrics(all_words, duration, vad_results)
         metrics["duration"] = round(duration, 2)
         metrics["transcript_confidence"] = int(avg_confidence)
+        metrics["average_volume"] = round(avg_volume, 2)
+        metrics["vad_speech_duration"] = vad_results["speech_duration"]
+        metrics["vad_silence_duration"] = vad_results["silence_duration"]
         
-        logger.info(f"Raw transcript: \"{metrics.get('raw_transcript', '')}\"")
-        logger.info(f"Cleaned transcript: \"{metrics.get('transcript', '')}\"")
-        logger.info(f"Filler-word extraction results: {metrics.get('filler_words', {})}")
-        logger.info("--- Audio Processing Pipeline Complete ---")
+        logger.info(f"Audio metrics: speech_dur={metrics['speech_duration']}s, WPM={metrics['words_per_minute']}, Vol={avg_volume:.1f}")
         return metrics
+        
     except Exception as e:
         logger.error(f"Error processing speech: {e}")
-        # Clean up temporary WAV file if it exists
-        if audio_path and os.path.exists(audio_path):
-            try:
-                os.remove(audio_path)
-            except Exception:
-                pass
         raise e
     finally:
-        # Always clean up temporary audio file to save disk space
         if audio_path and os.path.exists(audio_path):
             try:
                 os.remove(audio_path)

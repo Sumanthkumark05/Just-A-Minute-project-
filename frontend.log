@@ -1,0 +1,12 @@
+
+> frontend@0.1.0 dev
+> next dev -p 3000
+
+▲ Next.js 16.2.7 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.1.18:3000
+- Environments: .env.local
+✓ Ready in 647ms
+
+[API] Base URL configured as: http://localhost:8000/api
+ GET / 200 in 543ms (next.js: 200ms, application-code: 344ms)

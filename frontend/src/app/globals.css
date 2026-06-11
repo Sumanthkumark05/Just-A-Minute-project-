@@ -2,25 +2,25 @@
 @import "tailwindcss";
 
 :root {
-  --background: #09090b;
-  --foreground: #fafafa;
-  --card: #18181b;
-  --card-foreground: #fafafa;
-  --popover: #09090b;
-  --popover-foreground: #fafafa;
-  --primary: #8b5cf6;
-  --primary-foreground: #ffffff;
-  --secondary: #27272a;
-  --secondary-foreground: #fafafa;
-  --muted: #27272a;
-  --muted-foreground: #a1a1aa;
-  --accent: #27272a;
-  --accent-foreground: #fafafa;
-  --destructive: #ef4444;
-  --destructive-foreground: #fafafa;
-  --border: #27272a;
-  --input: #27272a;
-  --ring: #a78bfa;
+  --background: #FFFFFF;
+  --foreground: #0F172A;
+  --card: #FFFFFF;
+  --card-foreground: #0F172A;
+  --popover: #FFFFFF;
+  --popover-foreground: #0F172A;
+  --primary: #2563EB;
+  --primary-foreground: #FFFFFF;
+  --secondary: #F8FAFC;
+  --secondary-foreground: #0F172A;
+  --muted: #F1F5F9;
+  --muted-foreground: #64748B;
+  --accent: #EFF6FF;
+  --accent-foreground: #1E40AF;
+  --destructive: #EF4444;
+  --destructive-foreground: #FFFFFF;
+  --border: #E2E8F0;
+  --input: #F8FAFC;
+  --ring: #3B82F6;
 }
 
 @theme inline {
@@ -49,14 +49,14 @@
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #09090b;
+  background: #F8FAFC;
 }
 ::-webkit-scrollbar-thumb {
-  background: #27272a;
+  background: #CBD5E1;
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3f3f46;
+  background: #94A3B8;
 }
 
 body {
@@ -64,87 +64,57 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans);
   background-image: 
-    radial-gradient(at 0% 0%, hsla(263, 100%, 70%, 0.05) 0px, transparent 50%),
-    radial-gradient(at 100% 100%, hsla(240, 100%, 70%, 0.05) 0px, transparent 50%),
-    radial-gradient(at 50% 50%, hsla(280, 100%, 70%, 0.02) 0px, transparent 50%);
+    radial-gradient(at 0% 0%, hsla(217, 100%, 70%, 0.03) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, hsla(220, 100%, 70%, 0.03) 0px, transparent 50%);
   background-attachment: fixed;
   overflow-x: hidden;
 }
 
-/* Custom CSS Glassmorphism Utilities */
+/* Glassmorphism Light mode Utilities */
 .glass {
-  background: rgba(24, 24, 27, 0.65);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(226, 232, 240, 0.8);
 }
 
 .glass-accent {
-  background: rgba(139, 92, 246, 0.05);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(139, 92, 246, 0.2);
+  background: rgba(37, 99, 235, 0.02);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(37, 99, 235, 0.15);
 }
 
 .glass-input {
-  background: rgba(9, 9, 11, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  transition: all 0.2s ease-in-out;
 }
 .glass-input:focus {
-  border-color: rgba(139, 92, 246, 0.5);
+  border-color: #2563EB;
+  background: #FFFFFF;
   outline: none;
-  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
 /* Animations */
 @keyframes pulseGlow {
   0%, 100% {
-    box-shadow: 0 0 15px 2px rgba(139, 92, 246, 0.2);
+    box-shadow: 0 0 12px 1px rgba(37, 99, 235, 0.15);
   }
   50% {
-    box-shadow: 0 0 25px 6px rgba(139, 92, 246, 0.45);
+    box-shadow: 0 0 20px 4px rgba(37, 99, 235, 0.35);
   }
 }
 
 .pulse-glow {
-  animation: pulseGlow 2s infinite ease-in-out;
+  animation: pulseGlow 2.5s infinite ease-in-out;
 }
 
-@keyframes gradientFlow {
-  0% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-  100% {
-    background-position: 0% 50%;
-  }
-}
-
-.animate-gradient {
-  background-size: 200% 200%;
-  animation: gradientFlow 6s infinite linear;
-}
-
-.text-gradient {
-  background: linear-gradient(135deg, #a78bfa 0%, #ec4899 50%, #3b82f6 100%);
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.text-gradient-purple {
-  background: linear-gradient(135deg, #c084fc 0%, #818cf8 100%);
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-/* Card Hover Glow effect */
+/* Card Hover effect */
 .hover-glow {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .hover-glow:hover {
   transform: translateY(-2px);
-  border-color: rgba(139, 92, 246, 0.35);
-  box-shadow: 0 10px 30px -10px rgba(139, 92, 246, 0.2);
+  border-color: rgba(37, 99, 235, 0.25);
+  box-shadow: 0 8px 24px -8px rgba(37, 99, 235, 0.15);
 }

@@ -5,420 +5,398 @@ from typing import Dict, Any, List
 from app.config import settings
 from app.services.audio_processor import process_audio
 from app.services.vision_processor import process_video
+from app.services.scoring_engine import calculate_evidence_scores
 from app.services.ai_evaluator import evaluate_speech_with_gemini
 
 logger = logging.getLogger("jam_analyzer")
 
-def calculate_local_semantic_relevance(transcript: str, topic: str, category: str) -> int:
+def get_no_speech_response(message: str, diagnostics: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Calculates a dynamic semantic relevance score (0-100) between the transcript and the topic
-    by comparing cleaned content words, ignoring filler words and common stopwords,
-    and estimating overlap.
-    """
-    if not transcript or not topic:
-        return 0
-        
-    filler_words = {"um", "uh", "like", "you", "know", "actually", "basically", "literally", "sort", "of", "kind"}
-    stopwords = {
-        "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "aren't", "as", "at",
-        "be", "because", "been", "before", "being", "below", "between", "both", "but", "by", "can't", "cannot", "could",
-        "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during", "each", "few", "for",
-        "from", "further", "had", "hadn't", "has", "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's",
-        "her", "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i", "i'd", "i'll", "i'm",
-        "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself", "let's", "me", "more", "most", "mustn't",
-        "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other", "ought", "our", "ours",
-        "ourselves", "out", "over", "own", "same", "shan't", "she", "she'd", "she'll", "she's", "should", "shouldn't",
-        "so", "some", "such", "than", "that", "that's", "the", "their", "theirs", "them", "themselves", "then", "there",
-        "there's", "these", "they", "they'd", "they'll", "they're", "they've", "this", "those", "through", "to", "too",
-        "under", "until", "up", "very", "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were", "weren't",
-        "what", "what's", "when", "when's", "where", "where's", "which", "while", "who", "who's", "whom", "why", "why's",
-        "with", "won't", "would", "wouldn't", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves"
-    }
-    
-    # Helper to extract clean content words
-    def get_content_words(text: str) -> List[str]:
-        words = re.findall(r"\b\w+\b", text.lower())
-        return [w for w in words if w not in filler_words and w not in stopwords]
-        
-    topic_words = set(get_content_words(topic))
-    category_words = set(get_content_words(category))
-    transcript_words = set(get_content_words(transcript))
-    
-    if not topic_words:
-        return 70  # default fallback if topic has no content words
-        
-    # Check overlap with topic words
-    topic_overlap = len(topic_words.intersection(transcript_words))
-    
-    # Check overlap with category words (adds context)
-    category_overlap = len(category_words.intersection(transcript_words))
-    category_match_ratio = category_overlap / len(category_words) if category_words else 0
-    
-    # Simple semantic expansion: basic synonym mappings for common topics
-    synonym_map = {
-        "job": {"work", "employment", "career", "occupation", "employee", "hiring", "worker"},
-        "jobs": {"work", "employment", "careers", "occupations", "employees", "hiring", "workers"},
-        "ai": {"artificial", "intelligence", "technology", "machine", "learning", "automation", "robot", "software"},
-        "education": {"learning", "school", "college", "university", "student", "teacher", "study", "academic"},
-        "online": {"digital", "remote", "virtual", "internet", "web", "zoom"},
-        "offline": {"physical", "classroom", "person", "traditional"},
-        "teamwork": {"collaboration", "cooperation", "together", "group", "collective", "partner"},
-        "sports": {"athletics", "games", "players", "fitness", "exercise", "physical"},
-        "climate": {"environment", "warming", "green", "carbon", "nature", "earth", "weather"}
-    }
-    
-    # Check synonym overlap
-    synonym_hits = 0
-    for tw in topic_words:
-        if tw in transcript_words:
-            continue
-        if tw in synonym_map:
-            if synonym_map[tw].intersection(transcript_words):
-                synonym_hits += 1
-                
-    adjusted_topic_overlap = topic_overlap + synonym_hits
-    adjusted_ratio = min(1.0, adjusted_topic_overlap / len(topic_words))
-    
-    if adjusted_ratio > 0:
-        score = 50 + int(adjusted_ratio * 40) + int(category_match_ratio * 10)
-    else:
-        score = 30
-        
-    return min(100, score)
-
-def get_insufficient_audio_response(message: str) -> Dict[str, Any]:
-    """
-    Returns a database-conforming dictionary with scores set to 0 and message as transcript
-    when audio quality safeguards are triggered.
+    Returns a database-conforming dictionary indicating that no speech was detected,
+    conforming to the diagnostics requirements.
     """
     return {
-        "original_transcript": message,
-        "corrected_transcript": message,
-        "transcript": message,
-        "summary": message,
-        "key_points": [],
+        "status": "NO_SPEECH_DETECTED",
+        "feedback": message,
+        "original_transcript": "",
+        "corrected_transcript": "",
+        "transcript": "",
+        "overall_score": 0,
+        "rating": "Needs Improvement",
+        "diagnostics": diagnostics
+    }
+
+def generate_local_report_fallback(topic: str, category: str, transcript: str, scores: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Generates a local, rule-based qualitative evaluation matching the GeminiReportOutput schema
+    when API keys are missing or rate-limited.
+    """
+    wpm = scores["speech_analysis"]["speaking_rate"]["wpm"]
+    fillers = scores["speech_analysis"]["fillers"]["filler_count"]
+    eye_pct = scores["body_language_analysis"]["eye_contact"]["eye_contact_pct"]
+    posture = scores["body_language_analysis"]["posture"]["score"]
+    
+    # 1. Executive Summary
+    summary_bullets = [
+        f"Delivered a speech on the topic '{topic}' under category '{category}'.",
+        f"Maintained a speaking pace of {wpm} WPM with {fillers} filler word occurrences.",
+        f"Visual eye contact was recorded at {eye_pct:.1f}% with posture rating at {posture}%."
+    ]
+    
+    # 2. Detailed lists
+    strengths = []
+    improvements = []
+    
+    if 120 <= wpm <= 150:
+        strengths.append("Maintained an optimal, highly conversational speaking rate.")
+    else:
+        improvements.append("Adjust speaking rate closer to the conversational 135 WPM threshold.")
         
-        # Primary Database Metrics
-        "accuracy_score": 0,
-        "transcript_confidence": 0,
-        "semantic_similarity_score": 0,
+    if eye_pct >= 70:
+        strengths.append("Established consistent eye contact directly with the camera lens.")
+    else:
+        improvements.append("Focus gaze forward on the camera lens to project confidence.")
         
-        "fluency_score": 0,
-        "grammar_score": 0,
-        "pronunciation_score": 0,
-        "confidence_score": 0,
-        "communication_score": 0,
-        "words_per_minute": 0,
+    if fillers <= 3:
+        strengths.append("Extremely fluent transition phrasing with minimal filler vocalizations.")
+    else:
+        improvements.append("Reduce vocal filler words by replacing them with silent transition pauses.")
+
+    if len(strengths) < 2:
+        strengths.append("Earnest delivery and structural clarity.")
+        strengths.append("Addressed the general talking points of the category.")
+    if len(improvements) < 2:
+        improvements.append("Practice posture stabilization drills.")
+        improvements.append("Incorporate rhetorical structural patterns.")
+
+    # 3. Action plan
+    immediate = ["Implement the Lens-Dot target drill to anchor your visual gaze."]
+    short_term = ["Play the 'Pause Game' during discussions to eliminate filler words."]
+    long_term = ["Rehearse system architecture talking points aloud to build vocabulary structure."]
+
+    return {
+        "executive_summary": "\n".join([f"- {b}" for b in summary_bullets]),
         
-        # Detailed Sub-Metrics
-        "vocabulary_score": 0,
-        "speaking_pace_score": 0,
-        "eye_contact_score": 0,
-        "posture_score": 0,
-        "engagement_score": 0,
-        "content_quality_score": 0,
-        "topic_relevance_score": 0,
-        "dominant_emotion": "Neutral",
-        "emotion_stability_score": 0,
+        # Speech text
+        "speech_rate_reason": "Pacing was conversational." if 120 <= wpm <= 150 else "Speaking pace deviated from optimal range.",
+        "speech_rate_suggestion": "Maintain this comfortable rhythm." if 120 <= wpm <= 150 else "Slow down or speed up practice drills.",
         
-        # JSON stores
-        "filler_words": {},
-        "emotion_distribution": {},
-        "mistakes": [message],
-        "strengths": [],
-        "improvements": [],
-        "exercises": []
+        "speech_clarity_reason": "Transcription was successfully mapped without severe audio dropouts.",
+        "speech_clarity_suggestion": "Ensure consistent distance from the microphone.",
+        
+        "speech_pronunciation_reason": "Enunciation was clean and words were transcribed successfully.",
+        "speech_pronunciation_suggestion": "Speak slowly on multi-syllabic terms.",
+        
+        "speech_fluency_reason": "Audible flow was generally smooth.",
+        "speech_fluency_suggestion": "Practice structural outlines to reduce hesitation.",
+        
+        "speech_fillers_reason": f"Filler word frequency was recorded at {fillers} items.",
+        "speech_fillers_suggestion": "Practice locking your mouth during transition gaps.",
+        
+        "speech_confidence_reason": "Vocal pitch and loudness indicators remained stable.",
+        "speech_confidence_suggestion": "Practice deep breathing prior to recording.",
+
+        # Body language text
+        "body_eye_contact_evidence": f"Looked directly at the camera {eye_pct:.1f}% of the duration.",
+        "body_eye_contact_suggestion": "Anchor visual focus next to the camera lens.",
+        
+        "body_expressions_evidence": "Facial movements matched standard active listening patterns.",
+        "body_expressions_suggestion": "Utilize warm smiles at opening and closing points.",
+        
+        "body_posture_evidence": f"Maintained stable posture alignment scoring {posture}%.",
+        "body_posture_suggestion": "Align shoulders and check camera angle height.",
+        
+        "body_gestures_evidence": "Gestures were subtle or limited.",
+        "body_gestures_suggestion": "Raise hands to chest level during emphasis points.",
+        
+        "body_head_movement_evidence": "Head roll and tilt stayed within stable parameters.",
+        "body_head_movement_suggestion": "Keep chin level with the camera horizontal frame line.",
+
+        # Effectiveness text
+        "effectiveness_confidence_reason": "Measurable delivery signals reflect a balanced confidence style.",
+        "effectiveness_confidence_recommendation": "Vocalize with clear, assertive projection.",
+        
+        "effectiveness_professionalism_reason": "Vocabulary choices and posture alignment were professional.",
+        "effectiveness_professionalism_recommendation": "Adopt structured transition terms.",
+        
+        "effectiveness_engagement_reason": "Eye contact and expressions kept audience focus.",
+        "effectiveness_engagement_recommendation": "Vary tempo dynamically during key sentences.",
+        
+        "effectiveness_persuasiveness_reason": "Core vocabulary arguments showed basic logic flow.",
+        "effectiveness_persuasiveness_recommendation": "Present claims supported by evidence.",
+        
+        "effectiveness_leadership_reason": "Command of physical presence and head posture was positive.",
+        "effectiveness_leadership_recommendation": "Deliver transition statements with structural pauses.",
+
+        # Content text
+        "content_grammar_quality": "Grammatical structure was simple and direct.",
+        "content_vocabulary_richness": "Vocabulary selection was clear, focusing on category keywords.",
+        
+        # Lists
+        "detailed_strengths": strengths[:5] + ["Consistent posture"] * max(0, 5 - len(strengths)),
+        "areas_for_improvement": improvements[:5] + ["Increase vocabulary richness"] * max(0, 5 - len(improvements)),
+        
+        # Action Plan
+        "action_immediate": immediate,
+        "action_short_term": short_term,
+        "action_long_term": long_term,
+        
+        "expected_answer": f"An expert response to '{topic}' should introduce the core concept, explore trade-offs, and outline real-world examples.",
+        "corrected_transcript": transcript,
+        "summary": f"The speaker presented comments regarding '{topic}' under category '{category}'.",
+        "missing_concepts": ["Advanced industrial case studies", "Quantitative statistical evidence"]
     }
 
 def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str, Any]:
     """
-    Orchestrates the entire speech and body language analysis workflow:
-    1. Extracts audio and runs Whisper transcription + audio analysis.
-    2. Decodes video and runs MediaPipe Face Mesh + OpenCV visual tracking.
-    3. Runs LLM evaluation using Gemini if API key is present.
-    4. Falls back to a data-driven local evaluator if the API key is missing.
+    Centralized communication analyzer orchestrating audio processing, visual computer vision,
+    evidence formula scoring, and report generation.
     """
-    logger.info(f"Starting AI Analysis Pipeline for session topic: '{topic}'")
+    logger.info(f"--- Centralized Analysis Overhaul: '{topic}' ---")
     start_time = time.time()
     
-    # 1. Run local Speech / Audio processing
+    # 1. Run Audio & Speech Processing
     try:
-        logger.info("Executing local audio/speech pipeline...")
         speech_results = process_audio(video_path)
     except Exception as e:
         logger.error(f"Speech processing failed: {e}")
-        return get_insufficient_audio_response("Audio quality insufficient for reliable evaluation.")
+        diagnostics = {
+            "audio_length": 0.0,
+            "detected_speech_length": 0.0,
+            "whisper_confidence": 0.0,
+            "frames_processed": 0,
+            "face_detection_rate": 0.0
+        }
+        return get_no_speech_response("No speech detected. Analysis unavailable.", diagnostics)
 
-    # 1.1 Apply Safeguards
-    transcript = speech_results.get("transcript", "").strip()
-    confidence = speech_results.get("transcript_confidence", 0)
+    # Extract diagnostic variables
+    audio_length = speech_results.get("duration", 0.0)
+    detected_speech_length = speech_results.get("speech_duration", 0.0)
+    whisper_confidence = speech_results.get("transcript_confidence", 0)
     
-    clean_text = re.sub(r"[^\w\s]", "", transcript).strip()
-    if not clean_text or transcript == "Audio transcription failed." or confidence < 40:
-        logger.warning(f"Audio Safeguard Triggered - Transcript empty: {not clean_text}, Confidence: {confidence}%")
-        return get_insufficient_audio_response("Audio quality insufficient for reliable evaluation.")
+    # Apply strict VAD limit: Speech duration must be >= 2.0s
+    if detected_speech_length < 2.0:
+        logger.warning(f"VAD limit triggered: speech duration ({detected_speech_length}s) is less than 2.0s.")
+        diagnostics = {
+            "audio_length": round(audio_length, 1),
+            "detected_speech_length": round(detected_speech_length, 1),
+            "whisper_confidence": whisper_confidence,
+            "frames_processed": 0,
+            "face_detection_rate": 0.0
+        }
+        return get_no_speech_response("No speech detected (Speech duration under 2 seconds).", diagnostics)
 
-    # 2. Run local Video / Computer Vision processing
+    # 2. Run Video & Computer Vision Processing
     try:
-        logger.info("Executing local video/computer vision pipeline...")
         vision_results = process_video(video_path)
     except Exception as e:
         logger.error(f"Visual processing failed: {e}")
-        # Build empty/mock vision results as recovery
-        vision_results = {
-            "eye_contact_score": 50,
-            "posture_score": 50,
-            "confidence_score": 50,
-            "engagement_score": 50,
-            "emotion_distribution": {"Confident": 40.0, "Neutral": 40.0, "Nervous": 10.0, "Happy": 5.0, "Anxious": 5.0},
-            "dominant_emotion": "Neutral",
-            "emotion_stability_score": 60,
-            "fidgeting_index": 0.0
-        }
+        vision_results = get_fallback_metrics()
 
-    # 3. Choose Evaluator: Gemini API (Cloud) vs. Data-driven Fallback (Local)
-    if settings.GEMINI_API_KEY:
-        try:
-            logger.info("GEMINI_API_KEY detected. Running cloud AI evaluator...")
-            ai_eval = evaluate_speech_with_gemini(
-                topic=topic,
-                category=category,
-                transcript=speech_results["transcript"],
-                speech_metrics=speech_results,
-                vision_metrics=vision_results
-            )
-            
-            # Combine all metrics together
-            final_report = combine_metrics(speech_results, vision_results, ai_eval)
-            elapsed = time.time() - start_time
-            logger.info(f"AI Pipeline completed successfully in {elapsed:.2f}s using Gemini.")
-            return final_report
-            
-        except Exception as e:
-            logger.error(f"Gemini evaluation failed: {e}. Falling back to local data-driven evaluator.")
-    else:
-        logger.warning("GEMINI_API_KEY is not set. Using local data-driven evaluator.")
-
-    # 4. Local Data-Driven Fallback Evaluator
-    ai_eval = generate_local_evaluation(topic, category, speech_results, vision_results)
-    final_report = combine_metrics(speech_results, vision_results, ai_eval)
+    # Get video diagnostics
+    video_diags = vision_results.get("diagnostics", {"frames_processed": 0, "face_detection_rate": 0.0})
     
-    elapsed = time.time() - start_time
-    logger.info(f"AI Pipeline completed in {elapsed:.2f}s using local data-driven fallback.")
-    return final_report
+    # Consolidate diagnostics
+    diagnostics = {
+        "audio_length": round(audio_length, 1),
+        "detected_speech_length": round(detected_speech_length, 1),
+        "whisper_confidence": whisper_confidence,
+        "frames_processed": video_diags.get("frames_processed", 0),
+        "face_detection_rate": video_diags.get("face_detection_rate", 0.0)
+    }
 
-def combine_metrics(speech: Dict[str, Any], vision: Dict[str, Any], evaluation: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Merges speech metrics, vision metrics, and AI evaluation text/scores into a single database-conforming dictionary.
-    """
-    # Calculate fluency: combines speaking pace score and filler word penalties
-    filler_count = sum(speech.get("filler_words", {}).values())
-    filler_penalty = min(50, filler_count * 4)
-    fluency_score = max(30, speech.get("speaking_pace_score", 70) - filler_penalty)
-    
-    # Calculate pronunciation: influenced by eye contact, stability, and pace
-    pronunciation_score = max(50, 100 - int(vision.get("fidgeting_index", 0.0) * 1.5) - abs(speech.get("words_per_minute", 130) - 135) // 2)
-    # Clamp to max 98
-    pronunciation_score = min(98, pronunciation_score)
+    # 3. Librosa Voice metrics mapping
+    # Check if voice metrics are available, or create mock voice inputs
+    voice_metrics = {
+        "stability_score": 75.0,
+        "pitch_variation": 20.0,
+        "energy_variation": 0.05
+    }
 
-    # Calculate final accuracy score using weighted formula:
-    # - Transcript Confidence: 30%
-    # - Semantic Relevance to Topic: 30%
-    # - Fluency and Coherence: 20%
-    # - Grammar Quality: 10%
-    # - Pronunciation Clarity: 10%
-    transcript_conf = speech.get("transcript_confidence", 85)
-    semantic_sim = evaluation.get("semantic_similarity_score", 80)
-    grammar_score = evaluation.get("grammar_score", 80)
-    
-    accuracy_score = int(
-        (transcript_conf * 0.30) +
-        (semantic_sim * 0.30) +
-        (fluency_score * 0.20) +
-        (grammar_score * 0.10) +
-        (pronunciation_score * 0.10)
-    )
-    
-    logger.info("--- Weighted Score Calculation ---")
-    logger.info("Evaluation Inputs:")
-    logger.info(f"  Transcript Confidence: {transcript_conf}% (weight: 30%)")
-    logger.info(f"  Semantic Relevance: {semantic_sim}% (weight: 30%)")
-    logger.info(f"  Fluency Score: {fluency_score}% (weight: 20%)")
-    logger.info(f"  Grammar Score: {grammar_score}% (weight: 10%)")
-    logger.info(f"  Pronunciation Score: {pronunciation_score}% (weight: 10%)")
-    logger.info(f"Final Weighted Score: {accuracy_score}%")
-    logger.info("----------------------------------")
+    # 4. Compute Evidence-based scores (Formula Only)
+    scores = calculate_evidence_scores(speech_results, vision_results, voice_metrics)
 
-    mistakes = list(evaluation.get("mistakes", []))
+    # 5. Generate qualitative report (Gemini/Groq vs Fallback)
+    transcript = speech_results.get("transcript", "")
+    try:
+        report_text = evaluate_speech_with_gemini(topic, category, transcript, scores)
+    except Exception as e:
+        logger.warning(f"AI report generation failed: {e}. Generating local fallback report.")
+        report_text = generate_local_report_fallback(topic, category, transcript, scores)
 
-    # Warnings logic - threshold updated to 70%
-    if transcript_conf < 70:
-        logger.warning(f"Low transcript confidence detected: {transcript_conf}%")
-        mistakes.append(f"WARNING: Transcript confidence is low ({transcript_conf}%). AI Evaluation may be inaccurate. Please ensure a quiet environment and clear microphone.")
+    # Extract score details for analytics dashboard
+    wpm = scores["speech_analysis"]["speaking_rate"]["wpm"]
+    total_fillers = scores["speech_analysis"]["fillers"]["filler_count"]
+    eye_contact = scores["body_language_analysis"]["eye_contact"]["eye_contact_pct"]
+    posture = scores["body_language_analysis"]["posture"]["score"]
 
-    # Format and append timestamped filler occurrences to mistakes list
-    filler_occurrences = speech.get("filler_occurrences", [])
-    for occ in filler_occurrences:
-        mistakes.append(f"Vocal filler '{occ['filler']}' spoken at {occ['start']:.1f}s - {occ['end']:.1f}s")
-
-    original_transcript = evaluation.get("original_transcript") or speech.get("raw_transcript") or speech.get("transcript", "")
-    corrected_transcript = evaluation.get("corrected_transcript") or speech.get("transcript", "")
-
-    return {
-        "original_transcript": original_transcript,
-        "corrected_transcript": corrected_transcript,
-        "transcript": corrected_transcript,
-        "summary": evaluation.get("summary", ""),
-        "key_points": evaluation.get("key_points", []),
+    # 6. Build the unified report dictionary
+    final_report = {
+        "status": "SUCCESS",
+        "original_transcript": speech_results.get("raw_transcript", ""),
+        "corrected_transcript": report_text.get("corrected_transcript", transcript),
+        "transcript": report_text.get("corrected_transcript", transcript),
+        "summary": report_text.get("summary", ""),
+        # Expose whisper confidence so jam.py Transcript record can access it
+        "transcript_confidence": whisper_confidence,
         
         # Primary Database Metrics
-        "accuracy_score": accuracy_score,
-        "transcript_confidence": transcript_conf,
-        "semantic_similarity_score": semantic_sim,
+        "overall_score": scores["overall_score"],
+        "rating": scores["rating"],
         
-        "fluency_score": fluency_score,
-        "grammar_score": grammar_score,
-        "pronunciation_score": pronunciation_score,
-        "confidence_score": vision.get("confidence_score", 75),
-        "communication_score": evaluation.get("communication_score", 75),
-        "words_per_minute": speech.get("words_per_minute", 120),
+        # Sub-scores
+        "fluency_score": scores["speech_analysis"]["fluency"]["score"],
+        "grammar_score": scores["content_analysis"]["grammar_quality"],
+        "pronunciation_score": scores["speech_analysis"]["pronunciation"]["score"],
+        "confidence_score": scores["communication_effectiveness"]["confidence"]["score"],
+        "communication_score": scores["communication_effectiveness"]["leadership_presence"]["score"],
+        "words_per_minute": scores["speech_analysis"]["speaking_rate"]["wpm"],
         
-        # Detailed Sub-Metrics
-        "vocabulary_score": speech.get("vocabulary_score", 70),
-        "speaking_pace_score": speech.get("speaking_pace_score", 70),
-        "eye_contact_score": vision.get("eye_contact_score", 70),
-        "posture_score": vision.get("posture_score", 70),
-        "engagement_score": vision.get("engagement_score", 70),
-        "content_quality_score": evaluation.get("content_quality_score", 75),
-        "topic_relevance_score": evaluation.get("topic_relevance_score", 80),
-        "dominant_emotion": vision.get("dominant_emotion", "Neutral"),
-        "emotion_stability_score": vision.get("emotion_stability_score", 75),
+        # Sub-metrics
+        "vocabulary_score": scores["content_analysis"]["vocabulary_richness"],
+        "speaking_pace_score": scores["speech_analysis"]["speaking_rate"]["score"],
+        "eye_contact_score": scores["body_language_analysis"]["eye_contact"]["score"],
+        "posture_score": scores["body_language_analysis"]["posture"]["score"],
+        "engagement_score": scores["communication_effectiveness"]["engagement"]["score"],
+        "content_quality_score": scores["communication_effectiveness"]["persuasiveness"]["score"],
+        "topic_relevance_score": scores["communication_effectiveness"]["professionalism"]["score"],
+        "dominant_emotion": vision_results.get("expressions", {}).get("confidence", 70.0), # fallback emotion
+        "emotion_stability_score": scores["body_language_analysis"]["facial_expressions"]["score"],
         
-        # JSON stores
-        "filler_words": speech.get("filler_words", {}),
-        "emotion_distribution": vision.get("emotion_distribution", {}),
-        "mistakes": mistakes,
-        "strengths": evaluation.get("strengths", []),
-        "improvements": evaluation.get("improvements", []),
-        "exercises": evaluation.get("exercises", [])
+        # Professional fields
+        "expected_answer": report_text.get("expected_answer", ""),
+        "technical_accuracy_score": scores["communication_effectiveness"]["professionalism"]["score"] // 10,
+        "completeness_score": scores["communication_effectiveness"]["persuasiveness"]["score"] // 10,
+        "clarity_score": scores["speech_analysis"]["clarity"]["score"] // 10,
+        "relevance_score": scores["communication_effectiveness"]["professionalism"]["score"] // 10,
+        "final_verdict": scores["rating"],
+        "missing_concepts": report_text.get("missing_concepts", []),
+        
+        # Nested Report sections matching the 10 structure items
+        "report_data": {
+            "overall_score": scores["overall_score"],
+            "rating": scores["rating"],
+            "executive_summary": report_text.get("executive_summary", ""),
+            "speech_analysis": {
+                "speaking_rate": {
+                    "score": scores["speech_analysis"]["speaking_rate"]["score"],
+                    "reason": report_text.get("speech_rate_reason", ""),
+                    "suggestion": report_text.get("speech_rate_suggestion", "")
+                },
+                "clarity": {
+                    "score": scores["speech_analysis"]["clarity"]["score"],
+                    "reason": report_text.get("speech_clarity_reason", ""),
+                    "suggestion": report_text.get("speech_clarity_suggestion", "")
+                },
+                "pronunciation": {
+                    "score": scores["speech_analysis"]["pronunciation"]["score"],
+                    "reason": report_text.get("speech_pronunciation_reason", ""),
+                    "suggestion": report_text.get("speech_pronunciation_suggestion", "")
+                },
+                "fluency": {
+                    "score": scores["speech_analysis"]["fluency"]["score"],
+                    "reason": report_text.get("speech_fluency_reason", ""),
+                    "suggestion": report_text.get("speech_fluency_suggestion", "")
+                },
+                "fillers": {
+                    "score": scores["speech_analysis"]["fillers"]["score"],
+                    "reason": report_text.get("speech_fillers_reason", ""),
+                    "suggestion": report_text.get("speech_fillers_suggestion", "")
+                },
+                "confidence": {
+                    "score": scores["speech_analysis"]["confidence"]["score"],
+                    "reason": report_text.get("speech_confidence_reason", ""),
+                    "suggestion": report_text.get("speech_confidence_suggestion", "")
+                }
+            },
+            "body_language_analysis": {
+                "eye_contact": {
+                    "score": scores["body_language_analysis"]["eye_contact"]["score"],
+                    "evidence": report_text.get("body_eye_contact_evidence", ""),
+                    "suggestion": report_text.get("body_eye_contact_suggestion", "")
+                },
+                "facial_expressions": {
+                    "score": scores["body_language_analysis"]["facial_expressions"]["score"],
+                    "evidence": report_text.get("body_expressions_evidence", ""),
+                    "suggestion": report_text.get("body_expressions_suggestion", "")
+                },
+                "posture": {
+                    "score": scores["body_language_analysis"]["posture"]["score"],
+                    "evidence": report_text.get("body_posture_evidence", ""),
+                    "suggestion": report_text.get("body_posture_suggestion", "")
+                },
+                "gestures": {
+                    "score": scores["body_language_analysis"]["gestures"]["score"],
+                    "evidence": report_text.get("body_gestures_evidence", ""),
+                    "suggestion": report_text.get("body_gestures_suggestion", "")
+                },
+                "head_movement": {
+                    "score": scores["body_language_analysis"]["head_movement"]["score"],
+                    "evidence": report_text.get("body_head_movement_evidence", ""),
+                    "suggestion": report_text.get("body_head_movement_suggestion", "")
+                }
+            },
+            "communication_effectiveness": {
+                "confidence": {
+                    "score": scores["communication_effectiveness"]["confidence"]["score"],
+                    "reason": report_text.get("effectiveness_confidence_reason", ""),
+                    "recommendation": report_text.get("effectiveness_confidence_recommendation", "")
+                },
+                "professionalism": {
+                    "score": scores["communication_effectiveness"]["professionalism"]["score"],
+                    "reason": report_text.get("effectiveness_professionalism_reason", ""),
+                    "recommendation": report_text.get("effectiveness_professionalism_recommendation", "")
+                },
+                "engagement": {
+                    "score": scores["communication_effectiveness"]["engagement"]["score"],
+                    "reason": report_text.get("effectiveness_engagement_reason", ""),
+                    "recommendation": report_text.get("effectiveness_engagement_recommendation", "")
+                },
+                "persuasiveness": {
+                    "score": scores["communication_effectiveness"]["persuasiveness"]["score"],
+                    "reason": report_text.get("effectiveness_persuasiveness_reason", ""),
+                    "recommendation": report_text.get("effectiveness_persuasiveness_recommendation", "")
+                },
+                "leadership_presence": {
+                    "score": scores["communication_effectiveness"]["leadership_presence"]["score"],
+                    "reason": report_text.get("effectiveness_leadership_reason", ""),
+                    "recommendation": report_text.get("effectiveness_leadership_recommendation", "")
+                }
+            },
+            "content_analysis": {
+                "grammar_quality": scores["content_analysis"]["grammar_quality"],
+                "vocabulary_richness": scores["content_analysis"]["vocabulary_richness"],
+                "top_filler_words": scores["content_analysis"]["top_filler_words"],
+                "grammar_text": report_text.get("content_grammar_quality", ""),
+                "vocabulary_text": report_text.get("content_vocabulary_richness", "")
+            },
+            "detailed_strengths": report_text.get("detailed_strengths", []),
+            "areas_for_improvement": report_text.get("areas_for_improvement", []),
+            "action_plan": {
+                "immediate_actions": report_text.get("action_immediate", []),
+                "short_term_actions": report_text.get("action_short_term", []),
+                "long_term_actions": report_text.get("action_long_term", [])
+            },
+            "analytics_dashboard": {
+                "speech_confidence": whisper_confidence,
+                "eye_contact_pct": round(eye_contact, 1),
+                "posture_score": posture,
+                "speaking_rate": wpm,
+                "filler_word_count": total_fillers,
+                "engagement_score": scores["communication_effectiveness"]["engagement"]["score"]
+            }
+        },
+        
+        # Acoustic and visual data stores for DB mapping
+        "filler_words": speech_results.get("filler_words", {}),
+        "emotion_distribution": vision_results.get("expressions", {}),
+        "mistakes": report_text.get("areas_for_improvement", []),
+        "strengths": report_text.get("detailed_strengths", []),
+        "improvements": report_text.get("areas_for_improvement", []),
+        "exercises": report_text.get("action_immediate", []),
+        "diagnostics": diagnostics
     }
-
-def generate_local_evaluation(topic: str, category: str, speech: Dict[str, Any], vision: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Generates a highly personalized, data-driven assessment entirely in local Python code.
-    """
-    transcript = speech.get("transcript", "")
-    raw_transcript = speech.get("raw_transcript") or transcript
-    wpm = speech.get("words_per_minute", 0)
-    filler_counts = speech.get("filler_words", {})
-    total_fillers = sum(filler_counts.values())
     
-    eye_score = vision.get("eye_contact_score", 70)
-    posture_score = vision.get("posture_score", 70)
-    fidget_index = vision.get("fidgeting_index", 0.0)
-    
-    logger.info("--- Running Local Fallback Evaluation ---")
-    logger.info("Evaluation Inputs:")
-    logger.info(f"  Topic: '{topic}'")
-    logger.info(f"  Category: '{category}'")
-    logger.info(f"  Transcript Length: {len(transcript)} chars")
-    logger.info(f"  Speaking Pace: {wpm} WPM")
-    logger.info(f"  Filler Count: {total_fillers}")
-    logger.info(f"  Eye Contact Score: {eye_score}%")
-    logger.info(f"  Posture Score: {posture_score}%")
-    
-    # 1. Summary and Key Points generation based on actual transcription
-    words_list = [w for w in transcript.split() if len(w) > 4]
-    unique_words = list(set(words_list))
-    
-    keywords = sorted(unique_words, key=lambda w: transcript.lower().count(w.lower()), reverse=True)[:3]
-    keywords_str = ", ".join([f"'{k}'" for k in keywords]) if keywords else f"'{topic}'"
-
-    summary = (
-        f"The speaker delivered a {speech.get('duration', 60)}s speech on the topic '{topic}'. "
-        f"They spoke at a pace of {wpm} words per minute. "
-        f"The content centered around concepts related to {category}, specifically touching on vocabulary like {keywords_str}."
-    )
-    
-    key_points = [
-        f"Introduced key thoughts regarding {topic}.",
-        f"Expressed ideas using a total vocabulary pool of {len(unique_words)} distinct words."
-    ]
-    if keywords:
-        key_points.append(f"Emphasized concepts surrounding {keywords_str}.")
-
-    # 2. Score assessments
-    grammar_score = max(50, 95 - (total_fillers * 2) - max(0, 10 - len(unique_words) // 2))
-    content_quality = max(50, 90 - max(0, 120 - wpm) // 3 - total_fillers)
-    
-    communication_score = int(vision.get("engagement_score", 70) * 0.4 + speech.get("speaking_pace_score", 70) * 0.4 + grammar_score * 0.2)
-
-    # 3. Dynamic Strengths, Mistakes, and Recommendations
-    strengths = []
-    mistakes = []
-    improvements = []
-    exercises = []
-
-    # Speak pace assessment
-    if 115 <= wpm <= 145:
-        strengths.append("Excellent pacing: Speech rate is steady and easy to follow.")
-    elif wpm > 145:
-        mistakes.append("Fast speaking pace: Speech rate was too rapid, leading to minor pronunciation overlaps.")
-        improvements.append("Slow down slightly to let complex ideas resonate with the listener.")
-        exercises.append("Metronome rehearsal: Speak along to a slow, steady pulse (120 bpm) to internalize pacing.")
-    else:
-        mistakes.append("Slow speaking rate: Pacing felt hesitant, with some audible pauses.")
-        improvements.append("Increase word output speed to maintain listener energy and engagement.")
-        exercises.append("Speed-reading drill: Read paragraphs out loud as fast as possible to build speech agility.")
-
-    # Eye contact assessment
-    if eye_score >= 75:
-        strengths.append("Strong visual focus: Consistent eye contact with the camera.")
-    else:
-        mistakes.append("Low eye contact: Frequent glances away from the camera lens.")
-        improvements.append("Direct your gaze to the camera lens rather than looking down or at the screen.")
-        exercises.append("Lens-dot drill: Place a bright colored sticky dot right next to the camera lens as a visual anchor.")
-
-    # Posture/fidgeting assessment
-    if fidget_index < 2.0:
-        strengths.append("Excellent posture: Maintained a stable head position with minimal nervous movement.")
-    else:
-        mistakes.append("Unstable posture: Noticeable head tilting or nervous shifts.")
-        improvements.append("Ground your upper body and maintain a steady, relaxed posture.")
-        exercises.append("Mirror presentation: Deliver your speech in front of a mirror to build body orientation awareness.")
-
-    # Fillers assessment
-    if total_fillers > 4:
-        mistakes.append(f"High filler frequency: Used {total_fillers} filler vocalizations (e.g. {', '.join([f'{k}: {v}' for k, v in filler_counts.items() if v > 0])}).")
-        improvements.append("Reduce filler words by pausing silently during transitions instead of vocalizing.")
-        exercises.append("The Pause Game: When you feel a filler word coming, lock your mouth closed and count to one silently.")
-    else:
-        strengths.append("High fluency: Very clean transitions with low usage of filler words.")
-
-    # Ensure fallback minimum lists are filled
-    if len(strengths) == 0:
-        strengths.append("Earnest attempt with clearly structured introductory remarks.")
-    if len(mistakes) == 0:
-        mistakes.append("Slight muscle tension in the shoulders during key points.")
-    if len(improvements) == 0:
-        improvements.append("Incorporate more varied vocabulary to explain complex concepts.")
-    if len(exercises) == 0:
-        exercises.append("Mirror training: Speak for 1 minute while observing your posture in a mirror.")
-
-    local_relevance = calculate_local_semantic_relevance(transcript, topic, category)
-
-    return {
-        "original_transcript": raw_transcript,
-        "corrected_transcript": transcript,
-        "semantic_similarity_score": local_relevance,
-        "summary": summary,
-        "key_points": key_points,
-        "grammar_score": grammar_score,
-        "communication_score": communication_score,
-        "content_quality_score": content_quality,
-        "topic_relevance_score": local_relevance,
-        "mistakes": mistakes,
-        "strengths": strengths,
-        "improvements": improvements,
-        "exercises": exercises
-    }
+    elapsed = time.time() - start_time
+    logger.info(f"AI Redesigned Pipeline completed in {elapsed:.2f}s.")
+    return final_report

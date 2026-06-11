@@ -2,7 +2,6 @@ import pytest
 import numpy as np
 from app.services.audio_processor import clean_word, analyze_speech_metrics
 from app.services.vision_processor import estimate_gaze_hit, estimate_head_pose
-from app.services.ai_analyzer import generate_local_evaluation, combine_metrics
 
 def test_clean_word():
     assert clean_word("Hello!!!") == "hello"
@@ -58,13 +57,13 @@ def test_estimate_gaze_hit():
     right_eye = [np.array([0.1, 0.5]), np.array([0.9, 0.5])]
     right_pupil = np.array([0.5, 0.5])
     
-    assert estimate_gaze_hit(left_eye, left_pupil, right_eye, right_pupil) is True
+    assert estimate_gaze_hit(left_eye, left_pupil, right_eye, right_pupil)[0] is True
 
     # Mock unaligned pupil coordinates (Looking away)
     left_pupil_away = np.array([0.95, 0.5])
     right_pupil_away = np.array([0.95, 0.5])
     
-    assert estimate_gaze_hit(left_eye, left_pupil_away, right_eye, right_pupil_away) is False
+    assert estimate_gaze_hit(left_eye, left_pupil_away, right_eye, right_pupil_away)[0] is False
 
 def test_local_evaluation_fallback():
     speech = {
@@ -81,78 +80,74 @@ def test_local_evaluation_fallback():
         "duration": 10.0
     }
     vision = {
-        "eye_contact_score": 85,
-        "posture_score": 90,
-        "confidence_score": 88,
-        "engagement_score": 88,
-        "emotion_distribution": {"Confident": 70, "Neutral": 20, "Nervous": 10, "Happy": 0, "Anxious": 0},
-        "dominant_emotion": "Confident",
-        "emotion_stability_score": 85,
-        "fidgeting_index": 0.5
+        "eye_contact_percentage": 85.0,
+        "posture_score": 90.0,
+        "expressions": {"confidence": 70.0, "neutral": 20.0, "nervousness": 10.0, "happiness": 10.0},
+        "smile_frequency": 10.0,
+        "head_stability": 80.0,
+        "hand_movement_frequency": 20.0,
+        "gesture_effectiveness": 40.0,
+        "hand_detection_rate": 20.0
+    }
+    voice = {
+        "stability_score": 75.0,
+        "pitch_variation": 20.0,
+        "energy_variation": 0.05
     }
     
-    eval_report = generate_local_evaluation(
+    from app.services.scoring_engine import calculate_evidence_scores
+    scores = calculate_evidence_scores(speech, vision, voice)
+    
+    from app.services.ai_analyzer import generate_local_report_fallback
+    report = generate_local_report_fallback(
         topic="Is AI replacing jobs?",
         category="Technology",
-        speech=speech,
-        vision=vision
+        transcript=speech["transcript"],
+        scores=scores
     )
     
-    assert "summary" in eval_report
-    assert len(eval_report["strengths"]) > 0
-    assert eval_report["grammar_score"] > 80
-    assert eval_report["communication_score"] > 70
-    
-    combined = combine_metrics(speech, vision, eval_report)
-    assert combined["fluency_score"] == 91  # 95 - 4*1
-    assert combined["eye_contact_score"] == 85
-    assert combined["grammar_score"] == eval_report["grammar_score"]
+    assert "expected_answer" in report
+    assert "detailed_strengths" in report
+    assert len(report["detailed_strengths"]) > 0
 
 def test_speech_evaluation_weighted_and_safeguards():
-    from app.services.ai_analyzer import calculate_local_semantic_relevance, analyze_video_speech, get_insufficient_audio_response
+    from app.services.ai_analyzer import analyze_video_speech
+    from app.services.scoring_engine import calculate_evidence_scores
     
-    # 1. Test local semantic relevance scoring
-    score = calculate_local_semantic_relevance(
-        transcript="AI is replacing standard workforce jobs and creating career opportunities in technology",
-        topic="Is AI replacing jobs?",
-        category="Technology"
-    )
-    assert score >= 50
-    
-    # Test synonym mapping
-    score_synonym = calculate_local_semantic_relevance(
-        transcript="Artificial intelligence automates careers and work in the physical environment",
-        topic="Is AI replacing jobs?",
-        category="Technology"
-    )
-    assert score_synonym >= 50
-    
-    # 2. Test weighted scoring logic
     speech = {
         "transcript": "hello",
         "transcript_confidence": 90,
-        "speaking_pace_score": 80,
         "words_per_minute": 130,
         "filler_words": {"um": 0}
     }
     vision = {
-        "confidence_score": 80,
-        "fidgeting_index": 0.0,
-        "eye_contact_score": 80
+        "eye_contact_percentage": 80.0,
+        "posture_score": 80.0,
+        "expressions": {"confidence": 80.0, "neutral": 20.0, "nervousness": 0.0, "happiness": 0.0},
+        "smile_frequency": 0.0,
+        "head_stability": 80.0,
+        "hand_movement_frequency": 20.0,
+        "gesture_effectiveness": 40.0,
+        "hand_detection_rate": 20.0
     }
-    evaluation = {
-        "semantic_similarity_score": 80,
-        "grammar_score": 80
+    voice = {
+        "stability_score": 80.0,
+        "pitch_variation": 20.0,
+        "energy_variation": 0.05
     }
-    combined = combine_metrics(speech, vision, evaluation)
     
-    # Weights: 30% conf (27) + 30% relevance (24) + 20% fluency (16) + 10% grammar (8) + 10% pronunciation (9.8 clamped to 9) = 84
-    assert combined["accuracy_score"] == 84
+    scores = calculate_evidence_scores(speech, vision, voice)
     
-    # 3. Test safeguards triggering on invalid audio path
+    # Confidence Score: 40% Voice Stability (32) + 30% Eye Contact (24) + 20% Posture (16) + 10% Speaking Pace (clamped speaking_pace_score 70 => 7) => 32+24+16+7 = 79
+    assert scores["communication_effectiveness"]["confidence"]["score"] == 79
+    
+    # Professionalism Score: 40% Vocabulary (70 * 0.4 = 28) + 30% Posture (80 * 0.3 = 24) + 20% Fluency (100 * 0.2 = 20) + 10% Filler Word Reduction (100 * 0.1 = 10) => 28 + 24 + 20 + 10 = 82
+    assert scores["communication_effectiveness"]["professionalism"]["score"] == 82
+    
+    # Test safeguards triggering on invalid audio path
     blocked_empty = analyze_video_speech("dummy_path", "Is AI replacing jobs?", "Technology")
-    assert blocked_empty["accuracy_score"] == 0
-    assert "Audio quality insufficient for reliable evaluation." in blocked_empty["transcript"]
+    assert blocked_empty["status"] == "NO_SPEECH_DETECTED"
+    assert blocked_empty["overall_score"] == 0
 
 def test_speech_analysis_quality_improvements():
     from app.services.audio_processor import count_filler_words, clean_fillers_from_transcript
@@ -194,3 +189,37 @@ def test_speech_analysis_quality_improvements():
     assert metrics["filler_occurrences"][1]["filler"] == "like"
     assert metrics["filler_occurrences"][1]["start"] == 0.8
 
+def test_silent_and_low_confidence_scenarios():
+    from unittest.mock import patch
+    from app.services.ai_analyzer import analyze_video_speech
+    
+    # Case 1: Silent audio (Empty transcript, speech duration under 2 seconds)
+    with patch("app.services.ai_analyzer.process_audio") as mock_process:
+        mock_process.return_value = {
+            "raw_transcript": "",
+            "transcript": "",
+            "transcript_confidence": 0,
+            "words_per_minute": 0,
+            "filler_words": {},
+            "duration": 10.0,
+            "speech_duration": 0.5  # Under 2 seconds
+        }
+        res = analyze_video_speech("dummy_path", "Is AI replacing jobs?", "Technology")
+        assert res["status"] == "NO_SPEECH_DETECTED"
+        assert res["overall_score"] == 0
+        assert "under 2 seconds" in res["feedback"]
+
+    # Case 4: Very low-confidence audio with low speech duration
+    with patch("app.services.ai_analyzer.process_audio") as mock_process:
+        mock_process.return_value = {
+            "raw_transcript": "hello",
+            "transcript": "hello",
+            "transcript_confidence": 10,
+            "words_per_minute": 6,
+            "filler_words": {},
+            "duration": 10.0,
+            "speech_duration": 0.5  # Under 2 seconds
+        }
+        res = analyze_video_speech("dummy_path", "Is AI replacing jobs?", "Technology")
+        assert res["status"] == "NO_SPEECH_DETECTED"
+        assert res["overall_score"] == 0

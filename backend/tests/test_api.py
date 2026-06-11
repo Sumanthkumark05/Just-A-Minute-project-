@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.database import Base, get_db
 from app.config import settings
-from app.models import User, JAMSession, JAMMetrics
+from app.models import User
 from main import app
 
 # Setup test database (temporary SQLite file)
@@ -90,20 +90,46 @@ def test_signup_and_login():
     assert profile_data["name"] == "Test User"
 
 
-def test_topic_generation():
-    # Test random topic
-    response = client.get("/api/jam/topic")
-    assert response.status_code == 200
-    data = response.json()
-    assert "topic" in data
-    assert "category" in data
+from unittest.mock import patch
 
-    # Test topic for specific category
-    response = client.get("/api/jam/topic?category=Technology")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["category"] == "Technology"
-    assert "topic" in data
+def test_topic_generation():
+    # 1. Signup and login to get auth headers
+    signup_data = {
+        "email": "testtopic@example.com",
+        "password": "testpassword123",
+        "name": "Topic User"
+    }
+    client.post("/api/auth/signup", json=signup_data)
+    login_response = client.post("/api/auth/login", json={"email": "testtopic@example.com", "password": "testpassword123"})
+    token = login_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 2. Mock generate_topic_from_oss_120b to avoid external API calls
+    mock_topic_data = {
+        "topic": "Mock Dynamic AI Topic",
+        "category": "Technology",
+        "difficulty": "Medium",
+        "keywords": ["mock", "test"]
+    }
+    
+    with patch("app.routers.jam.generate_topic_from_llm", return_value=mock_topic_data) as mock_gen:
+        # Test new GET /generate-topic endpoint
+        response = client.get("/api/generate-topic", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["topic"] == "Mock Dynamic AI Topic"
+        assert data["category"] == "Technology"
+        assert data["difficulty"] == "Medium"
+        assert data["keywords"] == ["mock", "test"]
+        mock_gen.assert_called_once()
+
+        # Test old GET /topic backward compatibility endpoint
+        mock_gen.reset_mock()
+        response = client.get("/api/jam/topic?category=Technology", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["category"] == "Technology"
+        assert data["topic"] == "Mock Dynamic AI Topic"
 
 
 def test_jam_session_and_analytics():

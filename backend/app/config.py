@@ -7,7 +7,14 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     GEMINI_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
+    TOPIC_GENERATOR_MODEL: str = ""
     UPLOAD_DIR: str = "uploads"
+    DEEPGRAM_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
+    OPENAI_KEY: str = ""
+    PINECONE_API_KEY: str = ""
+    PINECONE_INDEX_NAME: str = "communication-twin"
 
     class Config:
         env_file = ".env"

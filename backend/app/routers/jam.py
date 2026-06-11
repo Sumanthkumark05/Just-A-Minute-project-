@@ -1,112 +1,143 @@
 import os
 import random
+import logging
 from typing import List, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session as DBSession
+
 from app.database import get_db
-from app.models import User, JAMSession, JAMMetrics
+from app.models import User, Session, Transcript, CommunicationDNA, VoiceMetrics, FaceMetrics, GrowthMetrics, Report
 from app.schemas import (
-    TopicRequest, TopicResponse, JAMSessionOut, 
+    TopicResponse, GenerateTopicResponse, SessionOut, 
     JAMSessionHistoryItem, LeaderboardEntry, ProgressPoint, DashboardStats
 )
 from app.auth import get_current_user
 from app.config import settings
+
+from app.services.deepgram_service import DeepgramService
+from app.services.voice_service import VoiceService
+from app.services.vision_processor import process_video
+from app.services.openai_service import OpenAIService
+from app.services.coach_agent import CoachAgent
+from app.services.audio_processor import extract_audio
+from app.services.topic_generator import generate_topic_from_llm
 from app.services.ai_analyzer import analyze_video_speech
 
+logger = logging.getLogger("jam_analyzer")
+
 router = APIRouter(prefix="/jam", tags=["jam"])
+api_router = APIRouter(tags=["jam"])
 
-# Curated topic repository by category
-TOPICS = {
-    "Technology": [
-        "Is AI replacing jobs?",
-        "Social media advantages and disadvantages",
-        "Electric vehicles and the future of transport",
-        "The impact of 5G on communication",
-        "Cybersecurity in the modern digital age",
-        "The role of privacy in the era of big data"
-    ],
-    "Education": [
-        "Future of education: Online vs Offline",
-        "Importance of learning soft skills",
-        "Is a college degree still necessary in 2026?",
-        "The role of emotional intelligence in schools",
-        "How to make learning fun for kids",
-        "The impact of gamification in education"
-    ],
-    "Sports": [
-        "Importance of teamwork in sports and life",
-        "Should esports be included in the Olympics?",
-        "Role of sports in building personal character",
-        "Mental health awareness in professional sports",
-        "Gender equality and pay gap in athletics",
-        "How sports bring diverse communities together"
-    ],
-    "Business": [
-        "Work-life balance in the corporate world",
-        "Gig economy: boon or bane for modern workers?",
-        "Entrepreneurship vs a secure corporate job",
-        "Importance of customer-first design and satisfaction",
-        "Green business practices and corporate responsibility",
-        "Remote work: productivity booster or culture killer?"
-    ],
-    "Current Affairs": [
-        "Climate change and the transition to renewable energy",
-        "Impact of globalization on local cultures",
-        "Universal Basic Income: pros and cons",
-        "Cryptocurrency: future of money or speculative bubble?",
-        "The critical role of independent media in democracy",
-        "Healthcare accessibility as a human right"
-    ],
-    "Personal Development": [
-        "The life-changing power of minor habits",
-        "Overcoming the fear of failure to achieve growth",
-        "Importance of active listening in communication",
-        "Healthy ways to manage stress and anxiety",
-        "Time management techniques for high performers",
-        "The role of gratitude in mental well-being"
-    ]
-}
+CATEGORIES = [
+    "Technology",
+    "AI",
+    "Education",
+    "Business",
+    "Environment",
+    "Startups",
+    "Leadership",
+    "Ethics",
+    "Social Issues",
+    "Innovation",
+    "Future Trends",
+    "Current Affairs"
+]
 
-@router.get("/topic", response_model=TopicResponse)
-def get_topic(category: Optional[str] = None):
-    # Select category
+@api_router.get("/generate-topic", response_model=GenerateTopicResponse)
+def get_generate_topic(
+    category: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
     selected_cat = category
-    if not selected_cat or selected_cat not in TOPICS:
-        selected_cat = random.choice(list(TOPICS.keys()))
+    if not selected_cat or selected_cat not in CATEGORIES:
+        selected_cat = random.choice(CATEGORIES)
     
-    # Select random topic from category
-    selected_topic = random.choice(TOPICS[selected_cat])
+    # Retrieve user's recent topics to exclude
+    recent_sessions = db.query(Session.topic).filter(
+        Session.user_id == current_user.id
+    ).order_by(Session.created_at.desc()).limit(20).all()
+    exclude_topics = [s[0] for s in recent_sessions if s[0]]
     
-    return {"topic": selected_topic, "category": selected_cat}
+    # Call topic generator
+    try:
+        topic_data = generate_topic_from_llm(selected_cat, exclude_topics)
+    except Exception as e:
+        logger.error(f"Topic generation failed: {e}")
+        # Default topic fallback
+        topic_data = {
+            "topic": f"The future of {selected_cat} in modern society",
+            "category": selected_cat,
+            "difficulty": "Medium",
+            "keywords": [selected_cat.lower(), "future", "innovation"],
+            "talking_points": ["Introduce the significance of " + selected_cat, "Outline key technological challenges", "Conclude with personal thoughts"],
+            "estimated_speaking_time": 60
+        }
 
-@router.post("/session", response_model=JAMSessionOut)
+    return {
+        "topic": topic_data["topic"],
+        "category": topic_data["category"],
+        "difficulty": topic_data["difficulty"],
+        "keywords": topic_data["keywords"],
+        "talking_points": topic_data.get("talking_points", []),
+        "estimated_speaking_time": topic_data.get("estimated_speaking_time", 60)
+    }
+
+@router.get("/topic", response_model=GenerateTopicResponse)
+def get_jam_topic(
+    category: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    return get_generate_topic(category=category, current_user=current_user, db=db)
+
+@api_router.get("/deepgram/token")
+async def get_deepgram_token(current_user: User = Depends(get_current_user)):
+    """
+    Generates a temporary token for client-side live streaming transcription.
+    """
+    try:
+        service = DeepgramService()
+        token = await service.generate_temp_token()
+        return {"token": token}
+    except Exception as e:
+        logger.error(f"Failed to generate Deepgram token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Deepgram token error: {str(e)}"
+        )
+
+@router.post("/session", response_model=SessionOut)
 def create_session(
     topic_data: TopicResponse, 
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: DBSession = Depends(get_db)
 ):
-    session = JAMSession(
+    session = Session(
         user_id=current_user.id,
+        session_type="jam",
         topic=topic_data.topic,
-        category=topic_data.category
+        category=topic_data.category,
+        instant_start=topic_data.instant_start,
+        preparation_mode=topic_data.preparation_mode,
+        skip_preparation=topic_data.skip_preparation
     )
     db.add(session)
     db.commit()
     db.refresh(session)
     return session
 
-@router.post("/session/{session_id}/upload", response_model=JAMSessionOut)
+@router.post("/session/{session_id}/upload", response_model=SessionOut)
 async def upload_video(
     session_id: str,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: DBSession = Depends(get_db)
 ):
-    session = db.query(JAMSession).filter(
-        JAMSession.id == session_id, 
-        JAMSession.user_id == current_user.id
+    session = db.query(Session).filter(
+        Session.id == session_id, 
+        Session.user_id == current_user.id
     ).first()
     
     if not session:
@@ -126,6 +157,7 @@ async def upload_video(
             content = await file.read()
             buffer.write(content)
     except Exception as e:
+        logger.error(f"Failed to save uploaded video: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to save uploaded video: {str(e)}"
@@ -133,65 +165,107 @@ async def upload_video(
         
     session.video_url = f"/uploads/{video_filename}"
     db.commit()
+
+    # Call centralized AI analysis pipeline
+    try:
+        report_data = analyze_video_speech(video_path, session.topic, session.category)
+    except Exception as e:
+        logger.error(f"Centralized analysis failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Video analysis failed: {str(e)}"
+        )
+
+    # Check for VAD error cases
+    if report_data.get("status") == "NO_SPEECH_DETECTED":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=report_data.get("feedback", "No speech detected (Speech duration under 2 seconds).")
+        )
+
+    # 1. Save Transcript Record
+    transcript_record = Transcript(
+        session_id=session.id,
+        raw_transcript=report_data["original_transcript"],
+        corrected_transcript=report_data["corrected_transcript"],
+        confidence_score=report_data["transcript_confidence"],
+        wpm=report_data["words_per_minute"],
+        pauses_detected=[],
+        word_timings=[]
+    )
+    db.add(transcript_record)
     
-    # Call Gemini Multimodal analysis (or mock fallback)
-    analysis = analyze_video_speech(video_path, session.topic, session.category)
-    
-    # Save transcript and summary on session
-    session.transcript = analysis.get("transcript", "")
-    session.summary = analysis.get("summary", "")
-    session.key_points = analysis.get("key_points", [])
-    
-    # Create or update metrics
-    metrics = session.metrics
-    if not metrics:
-        metrics = JAMMetrics(session_id=session.id)
-        db.add(metrics)
-        
-    metrics.accuracy_score = analysis.get("accuracy_score", 0)
-    metrics.transcript_confidence = analysis.get("transcript_confidence", 0)
-    metrics.semantic_similarity_score = analysis.get("semantic_similarity_score", 0)
-    metrics.original_transcript = analysis.get("original_transcript", "")
-    metrics.corrected_transcript = analysis.get("corrected_transcript", "")
-        
-    metrics.fluency_score = analysis.get("fluency_score", 0)
-    metrics.grammar_score = analysis.get("grammar_score", 0)
-    metrics.pronunciation_score = analysis.get("pronunciation_score", 0)
-    metrics.confidence_score = analysis.get("confidence_score", 0)
-    metrics.communication_score = analysis.get("communication_score", 0)
-    metrics.words_per_minute = analysis.get("words_per_minute", 0)
-    
-    # New Refactored Metrics
-    metrics.vocabulary_score = analysis.get("vocabulary_score", 0)
-    metrics.speaking_pace_score = analysis.get("speaking_pace_score", 0)
-    metrics.eye_contact_score = analysis.get("eye_contact_score", 0)
-    metrics.posture_score = analysis.get("posture_score", 0)
-    metrics.engagement_score = analysis.get("engagement_score", 0)
-    metrics.content_quality_score = analysis.get("content_quality_score", 0)
-    metrics.topic_relevance_score = analysis.get("topic_relevance_score", 0)
-    metrics.dominant_emotion = analysis.get("dominant_emotion", "Neutral")
-    metrics.emotion_stability_score = analysis.get("emotion_stability_score", 0)
-    
-    metrics.filler_words = analysis.get("filler_words", {})
-    metrics.emotion_distribution = analysis.get("emotion_distribution", {})
-    metrics.mistakes = analysis.get("mistakes", [])
-    metrics.strengths = analysis.get("strengths", [])
-    metrics.improvements = analysis.get("improvements", [])
-    metrics.exercises = analysis.get("exercises", [])
+    # 2. Save Acoustic & Visual metrics records
+    v_metrics_record = VoiceMetrics(
+        session_id=session.id,
+        pitch_variation=0.0,
+        energy_variation=0.0,
+        rhythm_score=float(report_data["words_per_minute"]),
+        stability_score=float(report_data["transcript_confidence"]),
+        pause_frequency=0.0,
+        vocal_verdict="Dynamic" if report_data["overall_score"] >= 75 else "Stable",
+        raw_metrics={}
+    )
+    db.add(v_metrics_record)
+
+    f_metrics_record = FaceMetrics(
+        session_id=session.id,
+        eye_contact_percentage=float(report_data["eye_contact_score"]),
+        gaze_direction_distribution={},
+        head_movement_variance=0.0,
+        head_tilt_average=0.0,
+        smile_frequency=float(report_data["emotion_stability_score"]),
+        attention_score=float(report_data["eye_contact_score"]),
+        engagement_score=float(report_data["engagement_score"]),
+        posture_stability=float(report_data["posture_score"]),
+        attention_heatmap=[]
+    )
+    db.add(f_metrics_record)
+    db.flush()
+
+    # 3. Save Communication DNA Record
+    dna_record = CommunicationDNA(
+        user_id=current_user.id,
+        session_id=session.id,
+        confidence=int(report_data["confidence_score"]),
+        fluency=int(report_data["fluency_score"]),
+        vocabulary=int(report_data["vocabulary_score"]),
+        storytelling=int(report_data["vocabulary_score"]),
+        leadership=int(report_data["communication_score"]),
+        persuasion=int(report_data["content_quality_score"]),
+        emotional_intelligence=int(report_data["emotion_stability_score"]),
+        clarity=int(report_data["clarity_score"] * 10),
+        energy_level=80,
+        speaking_speed=int(report_data["speaking_pace_score"]),
+        eye_contact=int(report_data["eye_contact_score"]),
+        posture=int(report_data["posture_score"]),
+        engagement=int(report_data["engagement_score"]),
+        filler_words=int(report_data["overall_score"]),
+        profile_summary=report_data["final_verdict"],
+        filler_word_frequency=report_data["filler_words"]
+    )
+    db.add(dna_record)
+
+    # 4. Save Report Entry (storing complete 10-section JSON in summary)
+    report = Report(
+        session_id=session.id,
+        summary=report_data["report_data"]
+    )
+    db.add(report)
     
     db.commit()
     db.refresh(session)
     return session
 
-@router.get("/session/{session_id}", response_model=JAMSessionOut)
+@router.get("/session/{session_id}", response_model=SessionOut)
 def get_session(
     session_id: str,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: DBSession = Depends(get_db)
 ):
-    session = db.query(JAMSession).filter(
-        JAMSession.id == session_id,
-        JAMSession.user_id == current_user.id
+    session = db.query(Session).filter(
+        Session.id == session_id,
+        Session.user_id == current_user.id
     ).first()
     
     if not session:
@@ -204,42 +278,45 @@ def get_session(
 @router.get("/history", response_model=List[JAMSessionHistoryItem])
 def get_history(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: DBSession = Depends(get_db)
 ):
-    sessions = db.query(JAMSession).filter(
-        JAMSession.user_id == current_user.id
-    ).order_by(JAMSession.created_at.desc()).all()
+    sessions = db.query(Session).filter(
+        Session.user_id == current_user.id
+    ).order_by(Session.created_at.desc()).all()
     
     history_items = []
     for s in sessions:
-        # If metrics exist, retrieve accuracy_score directly
-        overall_score = s.metrics.accuracy_score if s.metrics else 0
+        score = 0
+        if s.dna:
+            # overall average score of DNA metrics
+            score = int((s.dna.confidence + s.dna.fluency + s.dna.vocabulary + s.dna.storytelling + s.dna.leadership + s.dna.persuasion + s.dna.clarity) / 7)
+            
         history_items.append({
             "id": s.id,
             "topic": s.topic,
             "category": s.category,
+            "session_type": s.session_type,
             "created_at": s.created_at,
-            "overall_score": overall_score
+            "overall_score": score
         })
     return history_items
 
 @router.get("/leaderboard", response_model=List[LeaderboardEntry])
-def get_leaderboard(db: Session = Depends(get_db)):
-    # Calculate leaderboard by finding overall average scores for each user
-    # Select all users who have completed at least one session with metrics
+def get_leaderboard(db: DBSession = Depends(get_db)):
     users = db.query(User).all()
     leaderboard = []
     
     for u in users:
-        sessions = db.query(JAMSession).filter(JAMSession.user_id == u.id).all()
-        scored_sessions = [s for s in sessions if s.metrics]
+        sessions = db.query(Session).filter(Session.user_id == u.id).all()
+        scored_sessions = [s for s in sessions if s.dna]
         
         if not scored_sessions:
             continue
             
         total_score_sum = 0
         for s in scored_sessions:
-            total_score_sum += s.metrics.accuracy_score
+            score = int((s.dna.confidence + s.dna.fluency + s.dna.vocabulary + s.dna.storytelling + s.dna.leadership + s.dna.persuasion + s.dna.clarity) / 7)
+            total_score_sum += score
             
         user_average = round(total_score_sum / len(scored_sessions), 1)
         leaderboard.append({
@@ -248,10 +325,8 @@ def get_leaderboard(db: Session = Depends(get_db)):
             "sessions_count": len(scored_sessions)
         })
         
-    # Sort leaderboard by average score descending
     leaderboard.sort(key=lambda x: x["average_score"], reverse=True)
     
-    # Add ranks
     ranked_leaderboard = []
     for i, entry in enumerate(leaderboard):
         ranked_leaderboard.append({
@@ -261,18 +336,18 @@ def get_leaderboard(db: Session = Depends(get_db)):
             "sessions_count": entry["sessions_count"]
         })
         
-    return ranked_leaderboard[:10] # Top 10 users
+    return ranked_leaderboard[:10]
 
 @router.get("/analytics", response_model=DashboardStats)
 def get_analytics(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: DBSession = Depends(get_db)
 ):
-    sessions = db.query(JAMSession).filter(
-        JAMSession.user_id == current_user.id
-    ).order_by(JAMSession.created_at.asc()).all()
+    sessions = db.query(Session).filter(
+        Session.user_id == current_user.id
+    ).order_by(Session.created_at.asc()).all()
     
-    scored_sessions = [s for s in sessions if s.metrics]
+    scored_sessions = [s for s in sessions if s.dna]
     
     if not scored_sessions:
         return {
@@ -285,9 +360,9 @@ def get_analytics(
         }
         
     # Averages
-    avg_confidence = round(sum(s.metrics.confidence_score for s in scored_sessions) / len(scored_sessions), 1)
-    avg_fluency = round(sum(s.metrics.fluency_score for s in scored_sessions) / len(scored_sessions), 1)
-    avg_communication = round(sum(s.metrics.communication_score for s in scored_sessions) / len(scored_sessions), 1)
+    avg_confidence = round(sum(s.dna.confidence for s in scored_sessions) / len(scored_sessions), 1)
+    avg_fluency = round(sum(s.dna.fluency for s in scored_sessions) / len(scored_sessions), 1)
+    avg_communication = round(sum(s.dna.clarity for s in scored_sessions) / len(scored_sessions), 1)
     
     # Streak Calculation
     dates = sorted(list(set(s.created_at.date() for s in sessions)))
@@ -295,7 +370,6 @@ def get_analytics(
     today = datetime.utcnow().date()
     yesterday = today - timedelta(days=1)
     
-    # Check if user spoke today or yesterday to continue streak
     if today in dates or yesterday in dates:
         streak = 1
         current_date = dates[-1]
@@ -306,24 +380,25 @@ def get_analytics(
             else:
                 break
     
-    # Progress line graph data (group sessions by date)
+    # Progress Timeline data
     progress_data = []
-    # Group by date to average daily performances
     daily_groups = {}
     for s in scored_sessions:
         date_str = s.created_at.strftime("%Y-%m-%d")
         if date_str not in daily_groups:
             daily_groups[date_str] = []
-        daily_groups[date_str].append(s.metrics)
+        daily_groups[date_str].append(s.dna)
         
-    for date_str, metrics_list in sorted(daily_groups.items()):
+    for date_str, dna_list in sorted(daily_groups.items()):
         progress_data.append({
             "date": date_str,
-            "fluency": round(sum(m.fluency_score for m in metrics_list) / len(metrics_list), 1),
-            "grammar": round(sum(m.grammar_score for m in metrics_list) / len(metrics_list), 1),
-            "communication": round(sum(m.communication_score for m in metrics_list) / len(metrics_list), 1),
-            "pronunciation": round(sum(m.pronunciation_score for m in metrics_list) / len(metrics_list), 1),
-            "confidence": round(sum(m.confidence_score for m in metrics_list) / len(metrics_list), 1)
+            "confidence": round(sum(d.confidence for d in dna_list) / len(dna_list), 1),
+            "fluency": round(sum(d.fluency for d in dna_list) / len(dna_list), 1),
+            "vocabulary": round(sum(d.vocabulary for d in dna_list) / len(dna_list), 1),
+            "storytelling": round(sum(d.storytelling for d in dna_list) / len(dna_list), 1),
+            "leadership": round(sum(d.leadership for d in dna_list) / len(dna_list), 1),
+            "persuasion": round(sum(d.persuasion for d in dna_list) / len(dna_list), 1),
+            "engagement": round(sum(d.engagement for d in dna_list) / len(dna_list), 1)
         })
         
     return {
