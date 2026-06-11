@@ -30,3 +30,29 @@ build/
 
 # VS Code
 .vscode/
+
+# Logs
+*.log
+
+# Test reports
+test_report.md
+
+# Python cache
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS files
+Thumbs.db
+
+# Package lists
+installed_packages.txt
+
+# Audio test files
+*.wav
